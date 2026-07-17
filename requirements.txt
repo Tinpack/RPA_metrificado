@@ -1,0 +1,5 @@
+playwright==1.60.0
+pandas
+gspread
+requests
+python-dotenv

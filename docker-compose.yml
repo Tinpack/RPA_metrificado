@@ -1,0 +1,11 @@
+services:
+  rpa:
+    build: .
+    image: rpa-exames:latest
+    container_name: rpa-exames
+    env_file:
+      - .env
+    volumes:
+      - ./credenciais.json:/app/credenciais.json:ro,z
+      - ./data:/data:z
+    restart: "no"

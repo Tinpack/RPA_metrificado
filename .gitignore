@@ -1,0 +1,22 @@
+.env
+venv/
+downloads/
+__pycache__/
+credenciais.json
+historico_downloads.json
+pendentes_ia.json
+tipos_de_exames.txt
+logs/
+.venv/
+reports/
+.idea/
+data/
+
+# Dados sensíveis de pacientes (LGPD) — só o README de metricas é versionado
+metricas/*
+!metricas/README.md
+legado/
+*.bak
+
+# Anotações locais
+FLUXO.md

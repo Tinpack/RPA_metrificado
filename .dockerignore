@@ -1,0 +1,31 @@
+.git
+.gitignore
+.gitattributes
+.idea/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Secrets — mount como volume em runtime, nunca embutir na imagem
+.env
+credenciais.json
+
+# Estado / saída — persistir via volume
+downloads/
+reports/
+logs/
+historico_downloads.json
+pendentes_ia.json
+data/
+
+# Docs e meta
+README.md
+.claude/
+
+# Não recopiar os próprios arquivos Docker
+.dockerignore
+Dockerfile
+docker-compose.yml
