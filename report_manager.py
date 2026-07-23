@@ -213,7 +213,7 @@ class ReportManager:
         linhas.append("")
         linhas.append(f"Total de exames baixados com sucesso: {total_baixados}")
         linhas.append(
-            f"Total de exames ignorados (localização pré-operatória): {total_ignorados}"
+            f"Total de exames ignorados (localização pré-op / cópias de laudo): {total_ignorados}"
         )
         linhas.append(
             f"Total de exames com falha: {total_falhas} "

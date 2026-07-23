@@ -2,6 +2,7 @@ import os
 import time
 import re
 import shutil
+import difflib
 import requests
 import pandas as pd
 from datetime import datetime
@@ -16,8 +17,11 @@ from config import (
     USER_FIELD_SELECTOR, PASS_FIELD_SELECTOR, LOGIN_BUTTON_SELECTOR,
     SITE_URL, USER, PASS, DOWNLOAD_DIR, SEARCH_BAR_SELECTOR,
     EXAM_YEAR_CUTOFF, EXAM_YEAR_MAX, EXAM_EXCLUDE_KEYWORDS, EXAM_REPORT_EXCLUDE_MARKERS,
-    SEARCH_TIMEOUT, SEARCH_NOT_FOUND_GRACE, STUDY_WAIT_TIMEOUT,
-    LAUDO_WAIT_TIMEOUT, REPORT_POPUP_TIMEOUT,
+    SEARCH_TIMEOUT, SEARCH_NOT_FOUND_GRACE, SEARCH_SCROLL_CICLOS, STUDY_WAIT_TIMEOUT,
+    LAUDO_WAIT_TIMEOUT, REPORT_POPUP_TIMEOUT, REPORT_POPUP_RETRIES,
+    DEDUP_SIMILARIDADE, DEDUP_JANELA_DIAS, DEDUP_LOG_RATIO_MIN,
+    EXAM_MODALIDADES_PROIBIDAS, EXAM_PROCEDIMENTOS_PROIBIDOS,
+    EXAM_REPORT_RM_MARKERS, EXAM_REPORT_HEADER_DELIM, EXAM_REPORT_HEADER_MAX,
 )
 
 
@@ -32,6 +36,13 @@ def check_exam_date(date_str):
 def is_relevant_exam(exam_text: str) -> bool:
     normalized = remove_accents(exam_text).upper()
     if any(excl in normalized for excl in EXAM_EXCLUDE_KEYWORDS):
+        return False
+    # Denylist ANTES das palavras-chave: modalidade não autorizada (ressonância,
+    # tomografia, cintilografia...) e procedimentos (biópsia, punção) casam
+    # "MAMA"/"BREAST" e passariam pelo filtro de palavra-chave abaixo.
+    if re.search(EXAM_MODALIDADES_PROIBIDAS, normalized):
+        return False
+    if re.search(EXAM_PROCEDIMENTOS_PROIBIDOS, normalized):
         return False
     target_keywords = ["MAMA", "MAMO", "MAMMO", "MMG", "BREAST", "AXILA", "IMPLANT", "NODULO", "ECOGRAFIA", "ULTRASSONOGRAFIA"]
     return any(keyword in normalized for keyword in target_keywords)
@@ -52,10 +63,112 @@ def _texto_laudo(page) -> str:
     return " ".join(textos)
 
 
+def _frame_do_laudo(page):
+    # [DIAGNÓSTICO] Aponta qual frame contém o laudo (maior frame, excluindo o
+    # frame principal da UI #0). Retorna (indice, texto) ou (None, "").
+    melhor_i, melhor_t = None, ""
+    for i, fr in enumerate(page.frames):
+        if i == 0:
+            continue  # frame principal = UI do portal (lista de cards, abas)
+        try:
+            t = fr.inner_text("body")
+        except Exception:
+            continue
+        if len(t) > len(melhor_t):
+            melhor_i, melhor_t = i, t
+    return melhor_i, melhor_t
+
+
+def _log_laudo(page):
+    # [DIAGNÓSTICO] Loga índice/chars/marcador + hash (detecta staleness) + título
+    # do frame do laudo. Puramente log; nenhuma decisão depende disto.
+    import hashlib
+    idx, txt = _frame_do_laudo(page)
+    if idx is None:
+        print("    [RPA][laudo] frame do laudo nao encontrado")
+        return
+    h = hashlib.sha1(_normalizar_laudo(txt).encode("utf-8")).hexdigest()[:8]
+    print(f"    [RPA][laudo] frame={idx} chars={len(txt)} marcador={_texto_indica_skip(txt)} "
+          f"hash={h} titulo='{_titulo_laudo(txt)[:60]}'")
+
+
+def _texto_laudo_frame(page) -> str:
+    # Só o conteúdo do laudo (frames), SEM o body da página: o body traz toda a
+    # UI do portal (lista de cards, abas) e dois exames diferentes ficariam
+    # ~95% parecidos só por isso, inviabilizando a comparação por similaridade.
+    # Heurística: o maior texto entre os frames é o relatório.
+    melhor = ""
+    for frame in page.frames:
+        try:
+            t = frame.inner_text("body")
+        except Exception:
+            continue
+        if len(t) > len(melhor):
+            melhor = t
+    return melhor
+
+
+def _normalizar_laudo(texto: str) -> str:
+    return " ".join(remove_accents(texto or "").upper().split())
+
+
+def _ratio_laudo(a: str, b: str, limiar: float) -> float:
+    # Similaridade entre dois laudos normalizados. quick_ratio() é um limite
+    # SUPERIOR barato: se já fica abaixo do limiar, nem calcula o ratio real.
+    if not a or not b:
+        return 0.0
+    sm = difflib.SequenceMatcher(None, a, b)
+    if sm.quick_ratio() < limiar:
+        return 0.0
+    return sm.ratio()
+
+
+def _data_card(date_str):
+    # "DD/MM/AAAA HH:MM ..." -> datetime (só a data). None se não parsear.
+    try:
+        return datetime.strptime(date_str.split(" ")[0], "%d/%m/%Y")
+    except (ValueError, IndexError, AttributeError):
+        return None
+
+
+def _dentro_janela_dias(d1, d2, dias: int) -> bool:
+    # Sem data confiável em algum dos lados -> não deduplica (conservador).
+    if d1 is None or d2 is None:
+        return False
+    return abs((d1 - d2).days) <= dias
+
+
 def _texto_indica_skip(texto: str) -> bool:
     markers = [remove_accents(m).upper() for m in EXAM_REPORT_EXCLUDE_MARKERS]
     blob = remove_accents(texto).upper()
     return any(marker in blob for marker in markers)
+
+
+def _cabecalho_laudo(texto: str) -> str:
+    # Só o topo do laudo (cidade/data, paciente, médico e o TÍTULO do exame).
+    # "Informação Clínica" marca o início do corpo — e o corpo cita outras
+    # modalidades (um laudo de RM menciona "Ecografia mamária" ali), então
+    # procurar modalidade abaixo desse ponto daria falso positivo/negativo.
+    t = " ".join(remove_accents(texto or "").upper().split())
+    corte = t.find(EXAM_REPORT_HEADER_DELIM)
+    return t[:corte] if corte != -1 else t[:EXAM_REPORT_HEADER_MAX]
+
+
+def _titulo_laudo(texto: str) -> str:
+    # Título/tipo do exame. Âncora: a linha logo após "Dr. (a): ...", posição
+    # estável nos laudos do portal. Usado só para DIAGNÓSTICO (log) por enquanto:
+    # o corpo do laudo não é confiável para classificar (um laudo diagnóstico
+    # válido pode trazer "Prezado(a) colega", e um de RM cita "Ecografia").
+    linhas = [l.strip() for l in (texto or "").splitlines() if l.strip()]
+    for i, l in enumerate(linhas):
+        if remove_accents(l).upper().startswith("DR"):
+            return remove_accents(linhas[i + 1]).upper() if i + 1 < len(linhas) else ""
+    return remove_accents(" ".join(linhas[:4])).upper()
+
+
+def _laudo_eh_ressonancia(texto: str) -> bool:
+    cabecalho = _cabecalho_laudo(texto)
+    return any(m in cabecalho for m in EXAM_REPORT_RM_MARKERS)
 
 
 def report_should_skip(page) -> bool:
@@ -255,6 +368,16 @@ def _ler_linhas_resultado(page):
     return linhas
 
 
+def _rolar_resultados(page):
+    # Backstop: rola até a última linha renderizada. A RAIZ do "só 15 linhas" era o
+    # viewport baixo (corrigido no new_context em main.py); isto fica só como
+    # empurrão extra caso ainda falte renderizar alguma linha.
+    try:
+        page.locator("#patientsTableBody tr").last.scroll_into_view_if_needed(timeout=1000)
+    except Exception:
+        pass
+
+
 def _badge_resultado(page):
     # Conta resultados pelo badge da aba: "Localizar paciente (N)".
     try:
@@ -278,18 +401,43 @@ def buscar_paciente(page, nome_paciente: str, timeout: float = SEARCH_TIMEOUT,
     inicio = time.time()
     deadline = inicio + timeout
     viu_linhas = False
+    linhas_vistas = []       # maior conjunto de linhas já lido (p/ diagnóstico)
+    ultimo_total = 0         # p/ detectar quando a lista para de crescer
+    ciclos_sem_crescer = 0
     while time.time() < deadline:
         linhas = _ler_linhas_resultado(page)
         if linhas:
             viu_linhas = True
+            if len(linhas) > len(linhas_vistas):
+                linhas_vistas = linhas
             for idx, (nome_txt, id_txt) in enumerate(linhas):
                 if normalize_name(nome_txt) == alvo:
                     return {"index": idx, "id_cell": id_txt.strip(), "viu_linhas": True}
+            # Nenhum match: a lista costuma estar INCOMPLETA no DOM (só as linhas
+            # renderizadas vêm no seletor — o usuário vê 17, o seletor devolve 15).
+            # Rola para trazer as próximas e só desiste quando a contagem PARA de
+            # crescer. NÃO usar o badge como guarda: ele devolve a contagem de
+            # abas (leu "1" com 15 linhas), o que desativava o scroll por completo.
+            if len(linhas) > ultimo_total:
+                ultimo_total = len(linhas)
+                ciclos_sem_crescer = 0
+            else:
+                ciclos_sem_crescer += 1
+            if ciclos_sem_crescer < SEARCH_SCROLL_CICLOS:
+                _rolar_resultados(page)
         # Saída rápida: já deu tempo da busca rodar e o badge mostra 0 com
         # a tabela vazia -> paciente não existe (evita esperar o timeout todo).
         elif (time.time() - inicio) > grace and _badge_resultado(page) == 0:
             return {"index": None, "id_cell": None, "viu_linhas": viu_linhas}
         time.sleep(0.25)
+
+    # [DIAGNÓSTICO] Não achou: mostra o que foi lido para distinguir "lista
+    # incompleta" (lidas < badge) de "grafia diferente" (lidas == badge).
+    if viu_linhas:
+        print(f"    [RPA][busca] alvo='{alvo}' | {len(linhas_vistas)} linha(s) lidas "
+              f"(apos scroll; badge={_badge_resultado(page)} — nao confiavel):")
+        for i, (nome_txt, _) in enumerate(linhas_vistas, 1):
+            print(f"        {i:02d} '{nome_txt.strip()[:52]}' -> '{normalize_name(nome_txt)[:52]}'")
 
     return {"index": None, "id_cell": None, "viu_linhas": viu_linhas}
 
@@ -392,6 +540,18 @@ def process_patient_exams(page, context, nome_paciente: str, cpf_paciente: str, 
         report.registrar_alvos(nome_paciente, len(exames_alvo))
         print(f"    [RPA] Mapeamento interno concluído: {len(exames_alvo)} exames únicos serão baixados.")
 
+        # Vários cards abrem o MESMO laudo e a dedup mantém o primeiro baixado.
+        # Tenta primeiro o card com nome descritivo ("MG BREAST MAMOGRAFIA...")
+        # em vez do genérico ("** SOMENTE RELATÓRIO **"), para o arquivo salvo
+        # ficar com nome útil. sort estável: preserva a ordem dentro do grupo.
+        exames_alvo.sort(key=lambda a: 1 if "SOMENTE RELATORIO" in remove_accents(a["name"]).upper() else 0)
+
+        # Dedup por CONTEÚDO do laudo (mesma run/paciente): 1 laudo combinado
+        # costuma aparecer em vários cards (MAMO/ECO/AXILA) -> mesmo laudo baixado
+        # N vezes. Lista de (texto_normalizado, nome_exame, data) dos laudos
+        # efetivamente SALVOS deste paciente.
+        laudos_baixados = []
+
         for alvo in exames_alvo:
             i = alvo["index"]
             date_text = alvo["date"]
@@ -415,11 +575,65 @@ def process_patient_exams(page, context, nome_paciente: str, cpf_paciente: str, 
 
                 if _texto_indica_skip(laudo_atual):
                     print(f"    [RPA] Ignorado (laudo de localização pré-operatória): {name_str}")
+                    # [DIAGNÓSTICO] laudo_atual vem de _texto_laudo(), que inclui
+                    # o body da página (UI do portal, saudação ao médico logado).
+                    # Compara o veredito no FRAME do laudo vs no blob completo:
+                    # frame=False + pagina=True => o marcador disparou por
+                    # CONTAMINAÇÃO da UI, não pelo conteúdo do laudo.
+                    _log_laudo(page)  # [DIAGNÓSTICO] título/hash do laudo (staleness)
                     write_download_history(exam_history_id)
                     report.registrar_ignorado(nome_paciente)
                     report.atualizar_decisao_exame(  # [MÉTRICAS]
                         paciente=nome_paciente, data_exame=date_text,
                         nome_exame=name_str, decisao="ignorado_marcador")
+                    try:
+                        page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+                    time.sleep(0.3)
+                    continue
+
+                # Card sem modalidade no nome pode ser ressonância: decide pelo
+                # título no cabeçalho do laudo (o termo não autoriza RM).
+                if _laudo_eh_ressonancia(laudo_atual):
+                    print(f"    [RPA] Ignorado (laudo de ressonância magnética): {name_str}")
+                    write_download_history(exam_history_id)
+                    report.registrar_ignorado(nome_paciente)
+                    report.atualizar_decisao_exame(  # [MÉTRICAS]
+                        paciente=nome_paciente, data_exame=date_text,
+                        nome_exame=name_str, decisao="ignorado_ressonancia")
+                    try:
+                        page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+                    time.sleep(0.3)
+                    continue
+
+                # Cópia do mesmo laudo já baixado nesta run/paciente? -> pula.
+                # Compara por similaridade (data e IDs do rodapé mudam entre as
+                # cópias, e alguns nem aparecem em todas -> hash exato não serve).
+                laudo_norm = _normalizar_laudo(_texto_laudo_frame(page))
+                data_atual = _data_card(date_text)
+                dup_nome = None
+                for texto_ant, nome_ant, data_ant in laudos_baixados:
+                    if not _dentro_janela_dias(data_ant, data_atual, DEDUP_JANELA_DIAS):
+                        continue
+                    ratio = _ratio_laudo(texto_ant, laudo_norm, DEDUP_LOG_RATIO_MIN)
+                    if ratio >= DEDUP_SIMILARIDADE:
+                        dup_nome = nome_ant
+                        break
+                    if ratio >= DEDUP_LOG_RATIO_MIN:  # perto do limiar: loga p/ calibrar
+                        print(f"    [RPA][dedup] '{name_str}' vs '{nome_ant}': "
+                              f"ratio={ratio:.3f} (nao deduplicado)")
+
+                if dup_nome:
+                    print(f"    [RPA] Ignorado (cópia do mesmo laudo já baixado "
+                          f"'{dup_nome}'): {name_str}")
+                    write_download_history(exam_history_id)
+                    report.registrar_ignorado(nome_paciente)
+                    report.atualizar_decisao_exame(  # [MÉTRICAS]
+                        paciente=nome_paciente, data_exame=date_text,
+                        nome_exame=name_str, decisao="ignorado_duplicado")
                     try:
                         page.keyboard.press("Escape")
                     except Exception:
@@ -442,9 +656,26 @@ def process_patient_exams(page, context, nome_paciente: str, cpf_paciente: str, 
 
                 context.on("page", handle_new_page)
                 try:
-                    with context.expect_page(timeout=15000) as np:
-                        page.locator("span[id$='_printBtn'].btnPrint").click(force=True)
-                    new_page = np.value
+                    # O expect_page às vezes estoura por lentidão do portal
+                    # (falha transitória) — tenta de novo antes de desistir.
+                    ultimo_erro = None
+                    for tentativa in range(REPORT_POPUP_RETRIES + 1):
+                        try:
+                            with context.expect_page(timeout=15000) as np:
+                                page.locator("span[id$='_printBtn'].btnPrint").click(force=True)
+                            new_page = np.value
+                            break
+                        except Exception as e:
+                            ultimo_erro = e
+                            if tentativa < REPORT_POPUP_RETRIES:
+                                print(f"    [RPA] Popup não abriu (tentativa {tentativa + 1}), repetindo: {name_str}")
+                                try:
+                                    page.keyboard.press("Escape")
+                                except Exception:
+                                    pass
+                                time.sleep(1.0)
+                    if new_page is None:
+                        raise ultimo_erro
                     new_page.wait_for_load_state('domcontentloaded', timeout=15000)
                     # Espera o iframe do relatório aparecer (em vez de sleep fixo);
                     # sai cedo quando o iframe tem src ou quando o portal sinaliza
@@ -559,6 +790,8 @@ def process_patient_exams(page, context, nome_paciente: str, cpf_paciente: str, 
                     shutil.move(temp_save_path, final_dest_path)
 
                     write_download_history(exam_history_id)
+                    if laudo_norm:
+                        laudos_baixados.append((laudo_norm, name_str, data_atual))
                     stats["sucesso_rpa"] += 1
                     report.registrar_baixado(nome_paciente)
                     report.registrar_metodo(download_method or "desconhecido")

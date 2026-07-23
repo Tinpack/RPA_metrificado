@@ -1,5 +1,15 @@
 import os
+import sys
 import time  # [MÉTRICAS] cronometrar cada paciente
+
+# Console do Windows usa cp1252: textos de laudo (que começam com BOM ﻿ ou
+# trazem acentos) derrubavam o print e, por tabela, o processamento do exame.
+# UTF-8 + errors="replace" garante que nenhum print volte a quebrar a execução.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
@@ -56,7 +66,12 @@ def run_automation():
             launch_args += ["--no-sandbox", "--disable-setuid-sandbox",
                             "--disable-dev-shm-usage", "--disable-gpu"]
         browser = p.chromium.launch(headless=HEADLESS_MODE, args=launch_args)
-        context = browser.new_context(accept_downloads=True)
+        # Viewport ALTO: a lista de resultados da busca renderiza só as linhas que
+        # cabem na janela (com 720px cabiam ~15, escondendo o 16º/17º paciente e
+        # provocando "não encontrado"). ~2200px comporta ~40 linhas -> todas
+        # renderizam juntas (equivale a "tirar o zoom" no portal).
+        context = browser.new_context(accept_downloads=True,
+                                      viewport={"width": 1280, "height": 2200})
         page = context.new_page()
 
         try:

@@ -79,26 +79,6 @@ def _dentro_janela(data_exame):
     return ano is not None and EXAM_YEAR_CUTOFF <= ano <= EXAM_YEAR_MAX
 
 
-# Modalidades de interesse (mama). Usadas para casar o termo (texto livre) com o
-# nome_exame do gabarito, contando por categoria. Mesma família de palavras-chave
-# de core.is_relevant_exam. Retorna um CONJUNTO: uma linha do termo pode listar
-# exame combinado (ex.: "ECOGRAFIA MAMARIA E AXILAR" -> {ECO_MAMA, AXILA}).
-CATEGORIAS = ("MAMOGRAFIA", "ECO_MAMA", "AXILA")
-
-
-def _categorias(texto):
-    t = _norm(texto)  # sem acento, maiúsculo
-    cats = set()
-    if any(k in t for k in ("AXILA", "AXILAR")):
-        cats.add("AXILA")
-    if any(k in t for k in ("MAMOGRAFIA", "MAMOGRAF", "MAMO", "MMG", "MAMMO")):
-        cats.add("MAMOGRAFIA")
-    if (any(k in t for k in ("ECOGRAFIA", "ECOGRAF", "US ", " US", "ULTRASSON"))
-            and any(k in t for k in ("MAMA", "MAMARIA", "BREAST"))):
-        cats.add("ECO_MAMA")
-    return cats
-
-
 def _div(num, den):
     return (num / den) if den else None
 
@@ -452,9 +432,10 @@ def _celulas_por_coluna(xlsx_path):
 
 
 def carregar_termo(xlsx_path):
-    """Termo de consentimento -> {paciente_norm: Counter(categoria -> qtd)}.
-    Cada coluna é um paciente (linha 1); cada célula abaixo é um laudo cujo texto
-    lista modalidades (uma por linha). Soma as ocorrências por categoria."""
+    """Termo de consentimento -> {paciente_norm: nº de exames (int)}.
+    Cada coluna é um paciente (linha 1); cada célula não-vazia abaixo é UM exame
+    (um laudo combinado que apenas menciona várias modalidades no seu texto).
+    Conta 1 exame por célula/bloco — NÃO conta cada modalidade como um exame."""
     if not os.path.exists(xlsx_path):
         return {}
     cols = _celulas_por_coluna(xlsx_path)
@@ -463,33 +444,33 @@ def carregar_termo(xlsx_path):
         nome = celulas.get(1)
         if not nome:
             continue
-        cont = termo.setdefault(_norm(nome), Counter())
+        chave = _norm(nome)
+        termo.setdefault(chave, 0)
         for row, texto in celulas.items():
-            if row == 1:
+            if row == 1 or not texto.strip():
                 continue
-            for linha in re.split(r"[\r\n]+", texto):
-                if not linha.strip():
-                    continue
-                for cat in _categorias(linha):
-                    cont[cat] += 1
+            termo[chave] += 1  # cada célula/bloco = 1 exame (laudo)
     return termo
 
 
 def validar_gabarito(gabarito, termo):
-    """Confere a CONFORMIDADE do gabarito.csv contra o termo (.xlsx), por
-    paciente e por modalidade, considerando só a janela. Não altera arquivos."""
+    """Confere a CONFORMIDADE do gabarito.csv contra o termo (.xlsx), contando
+    EXAMES por paciente (na janela). Termo = nº de laudos aprovados (1 por bloco);
+    gabarito = nº de exames com autorizado=1. Não altera arquivos.
+
+    Obs.: o gabarito é por card do portal e um laudo combinado costuma aparecer
+    em vários cards, então o autorizado pode SUPERESTIMAR vs. o termo (aparece
+    como [DIVERGENCIA] excesso). Esperado até resolver a dedup card->laudo."""
     if not termo:
         print(f"AVISO: termo vazio/inexistente. Nada a validar.")
         return
 
-    # Conta autorizado=1 por paciente/categoria dentro da janela.
-    autorizados = {}
+    # Conta 1 por exame autorizado (autorizado=1) por paciente, dentro da janela.
+    autorizados = Counter()
     for (pac, data, nome), aut in gabarito.items():
         if not aut or not _dentro_janela(data):
             continue
-        cont = autorizados.setdefault(pac, Counter())
-        for cat in _categorias(nome):
-            cont[cat] += 1
+        autorizados[pac] += 1
 
     print("\n" + "=" * 78)
     print(f"VALIDACAO DO GABARITO x TERMO (janela {EXAM_YEAR_CUTOFF}-{EXAM_YEAR_MAX})")
@@ -497,46 +478,39 @@ def validar_gabarito(gabarito, termo):
 
     avisos = Counter()
     pacientes = sorted(set(termo) | set(autorizados))
-    tot_esperado, tot_autorizado = Counter(), Counter()
+    tot_esperado = tot_autorizado = 0
     for pac in pacientes:
-        esp = termo.get(pac, Counter())
-        aut = autorizados.get(pac, Counter())
-        for c in CATEGORIAS:
-            tot_esperado[c] += esp.get(c, 0)
-            tot_autorizado[c] += aut.get(c, 0)
+        esp = termo.get(pac, 0)
+        aut = autorizados.get(pac, 0)
+        tot_esperado += esp
+        tot_autorizado += aut
 
         if esp and not aut:
-            print(f"\n[COBERTURA] {pac}: esperado no termo {dict(esp)}, "
+            print(f"\n[COBERTURA] {pac}: esperado no termo {esp} exame(s), "
                   f"mas 0 autorizado no gabarito (janela).")
             avisos["sem_cobertura"] += 1
             continue
         if aut and not esp:
-            print(f"\n[FORA DO TERMO] {pac}: {dict(aut)} autorizado(s) no gabarito, "
+            print(f"\n[FORA DO TERMO] {pac}: {aut} exame(s) autorizado(s) no gabarito, "
                   f"mas paciente ausente/vazio no termo.")
             avisos["fora_do_termo"] += 1
             continue
 
-        difs = []
-        for c in CATEGORIAS:
-            e, a = esp.get(c, 0), aut.get(c, 0)
-            if e > a:
-                difs.append(f"{c}: faltam {e - a} (esperado {e}, autorizado {a}) [possivel FN]")
-                avisos["deficit"] += 1
-            elif a > e:
-                difs.append(f"{c}: {a - e} a mais (esperado {e}, autorizado {a}) [possivel FP]")
-                avisos["excesso"] += 1
-        if difs:
-            print(f"\n[DIVERGENCIA] {pac}:")
-            for d in difs:
-                print(f"    - {d}")
+        if esp > aut:
+            print(f"\n[DIVERGENCIA] {pac}: faltam {esp - aut} "
+                  f"(esperado {esp}, autorizado {aut}) [possivel FN]")
+            avisos["deficit"] += 1
+        elif aut > esp:
+            print(f"\n[DIVERGENCIA] {pac}: {aut - esp} a mais "
+                  f"(esperado {esp}, autorizado {aut}) [possivel FP]")
+            avisos["excesso"] += 1
         else:
-            print(f"\n[OK] {pac}: bate ({dict(aut)}).")
+            print(f"\n[OK] {pac}: bate ({aut} exame(s)).")
 
     print("\n" + "-" * 78)
     print(f"Pacientes conferidos: {len(pacientes)}")
-    for c in CATEGORIAS:
-        print(f"  {c:<11} esperado(termo)={tot_esperado[c]:>3}  "
-              f"autorizado(gabarito)={tot_autorizado[c]:>3}")
+    print(f"  Exames esperado(termo)={tot_esperado:>4}  "
+          f"autorizado(gabarito)={tot_autorizado:>4}")
     print(f"Avisos: {dict(avisos) or 'nenhum'}")
     print("=" * 78)
 

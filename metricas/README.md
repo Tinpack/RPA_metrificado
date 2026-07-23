@@ -71,7 +71,9 @@ O casamento com a telemetria é por `paciente + data_exame + nome_exame` (ignora
 
 ## Validação contra o termo de consentimento (`--validar-gabarito`)
 
-`termo_consentimento_exames_aprovados_2024_2025.xlsx` é a verdade-base: matriz onde **cada coluna é um paciente** e **cada linha abaixo é um laudo** cujo texto lista as modalidades (mamografia, ecografia mamária, ecografia das axilas) e a quantidade de cada — **sem data**. `python calcular_metricas.py --validar-gabarito` conta, por paciente e por modalidade, o **esperado** (termo) vs. o `autorizado=1` no gabarito (na janela), e imprime avisos: **déficit** (possível FN), **excesso** (possível FP), paciente **fora do termo** e **sem cobertura**. É só conferência — **não altera** o gabarito. Leitura do `.xlsx` é via `zipfile` (stdlib, sem `openpyxl`).
+`termo_consentimento_exames_aprovados_2024_2025.xlsx` é a verdade-base: matriz onde **cada coluna é um paciente** (linha 1) e **cada célula abaixo é UM exame** — um laudo combinado que apenas *menciona* várias modalidades (mamografia, ecografia mamária, ecografia das axilas) no seu texto — **sem data**. Ex.: um bloco "MAMOGRAFIA + ECO MAMÁRIA + ECO DAS AXILAS" conta como **1 exame**, não 3. `python calcular_metricas.py --validar-gabarito` conta, **por paciente**, o nº de **exames esperados** (termo) vs. o nº de exames com `autorizado=1` no gabarito (na janela), e imprime avisos: **déficit** (possível FN), **excesso** (possível FP), paciente **fora do termo** e **sem cobertura**. É só conferência — **não altera** o gabarito. Leitura do `.xlsx` é via `zipfile` (stdlib, sem `openpyxl`).
+
+> ⚠️ O gabarito é **por card** do portal e um laudo combinado costuma aparecer em vários cards, então o **autorizado** pode superestimar vs. o termo (aparece como `[DIVERGENCIA] excesso`). Isso é esperado até resolver a deduplicação card→laudo no download.
 
 ## Convenções e suposições
 
