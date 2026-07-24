@@ -56,9 +56,12 @@ EXAM_MODALIDADES_PROIBIDAS = (
     r"\bMR\b|\bRM\b|RESSONANCIA|\bTC\b|\bCT\b|TOMOGRAFIA|"
     r"\bPET\b|CINTILOGRAFIA|CINTILO|DENSITOMETRIA"
 )
-# Procedimentos (intervenção, não exame diagnóstico).
+# Procedimentos (intervenção, não exame diagnóstico). "GUIADA/GUIADO POR" é o sinal
+# geral de exame guiado por imagem (biópsia/punção/localização) — pega tipos ainda
+# não enumerados. Validado: dos nomes reais, só um casa e já era bloqueado por
+# PUNCAO/BIOPSIA, então adicioná-lo não barra nenhum exame válido.
 EXAM_PROCEDIMENTOS_PROIBIDOS = (
-    r"BIOPSIA|BIOPSY|PUNCAO|DEMARCA|LOCALIZACAO|LOCALIZATION|NEEDLE"
+    r"BIOPSIA|BIOPSY|PUNCAO|DEMARCA|LOCALIZACAO|LOCALIZATION|NEEDLE|GUIAD[AO] POR"
 )
 
 # Cards sem modalidade no nome (ex.: "** SOMENTE RELATÓRIO ** BREAST") passam no

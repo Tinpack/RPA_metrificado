@@ -89,7 +89,9 @@ def _log_laudo(page):
         return
     h = hashlib.sha1(_normalizar_laudo(txt).encode("utf-8")).hexdigest()[:8]
     print(f"    [RPA][laudo] frame={idx} chars={len(txt)} marcador={_texto_indica_skip(txt)} "
-          f"hash={h} titulo='{_titulo_laudo(txt)[:60]}'")
+          f"hash={h} valido={_laudo_tem_titulo_valido(txt)} titulo='{_titulo_laudo_principal(txt)[:70]}'")
+    # [DIAGNÓSTICO] texto cru do frame (revela a estrutura real; stdout já é UTF-8)
+    print(f"    [RPA][laudo]   RAW: {_normalizar_laudo(txt)[:600]}")
 
 
 def _texto_laudo_frame(page) -> str:
@@ -164,6 +166,26 @@ def _titulo_laudo(texto: str) -> str:
         if remove_accents(l).upper().startswith("DR"):
             return remove_accents(linhas[i + 1]).upper() if i + 1 < len(linhas) else ""
     return remove_accents(" ".join(linhas[:4])).upper()
+
+
+def _titulo_laudo_principal(texto: str) -> str:
+    # O TÍTULO do exame fica no topo do laudo, ANTES do início do corpo — que
+    # começa por um destes cabeçalhos: "Prezado(a) colega" (cartas), "Informação
+    # Clínica" ou "Resumo Clínico" (laudos diagnósticos). Delimitador que existe
+    # com certeza. Pega SÓ esse primeiro trecho (o título de verdade) — não varre
+    # o corpo: a carta de biópsia cita "US axilar prévia..." no corpo, e olhar
+    # janelas do corpo resgatava a biópsia por engano (caso Rosangela).
+    t = " ".join(remove_accents(texto or "").upper().split())
+    cortes = [p for d in ("PREZADO", "INFORMACAO CLINICA", "RESUMO CLINICO")
+              for p in [m.start() for m in re.finditer(d, t)]]
+    return t[:min(cortes)] if cortes else t[:200]
+
+
+def _laudo_tem_titulo_valido(texto: str) -> bool:
+    # True se o TÍTULO principal for um exame diagnóstico válido. Resgata o laudo
+    # que traz "Prezado(a) colega" no corpo mas cujo título é exame legítimo
+    # (Janete, Virginia pág.1); barra biópsia/pré-op puros (título é o procedimento).
+    return is_relevant_exam(_titulo_laudo_principal(texto))
 
 
 def _laudo_eh_ressonancia(texto: str) -> bool:
@@ -574,24 +596,31 @@ def process_patient_exams(page, context, nome_paciente: str, cpf_paciente: str, 
                 laudo_atual = esperar_laudo_carregar(page, laudo_anterior)
 
                 if _texto_indica_skip(laudo_atual):
-                    print(f"    [RPA] Ignorado (laudo de localização pré-operatória): {name_str}")
-                    # [DIAGNÓSTICO] laudo_atual vem de _texto_laudo(), que inclui
-                    # o body da página (UI do portal, saudação ao médico logado).
-                    # Compara o veredito no FRAME do laudo vs no blob completo:
-                    # frame=False + pagina=True => o marcador disparou por
-                    # CONTAMINAÇÃO da UI, não pelo conteúdo do laudo.
-                    _log_laudo(page)  # [DIAGNÓSTICO] título/hash do laudo (staleness)
-                    write_download_history(exam_history_id)
-                    report.registrar_ignorado(nome_paciente)
-                    report.atualizar_decisao_exame(  # [MÉTRICAS]
-                        paciente=nome_paciente, data_exame=date_text,
-                        nome_exame=name_str, decisao="ignorado_marcador")
-                    try:
-                        page.keyboard.press("Escape")
-                    except Exception:
-                        pass
-                    time.sleep(0.3)
-                    continue
+                    # "Prezado(a) colega" / pré-op no CORPO não bastam: um exame
+                    # diagnóstico válido (ecografia/mamografia) também traz essa
+                    # saudação. Decide pelo TÍTULO de cada seção do laudo — se
+                    # qualquer uma for exame válido, mantém (ex.: Virginia com
+                    # pág.1 ecografia + pág.2 biópsia); só biópsia/pré-op puros
+                    # (nenhuma seção válida) são pulados.
+                    _, _texto_laudo6 = _frame_do_laudo(page)
+                    if _laudo_tem_titulo_valido(_texto_laudo6):
+                        print(f"    [RPA] Marcador no corpo, mas título diagnóstico válido — mantido: {name_str}")
+                        _log_laudo(page)  # [DIAGNÓSTICO] confirma o título extraído
+                        # não pula: segue para RM/dedup/download normalmente
+                    else:
+                        print(f"    [RPA] Ignorado (carta/procedimento — biópsia/pré-op): {name_str}")
+                        _log_laudo(page)  # [DIAGNÓSTICO] título/hash do laudo
+                        write_download_history(exam_history_id)
+                        report.registrar_ignorado(nome_paciente)
+                        report.atualizar_decisao_exame(  # [MÉTRICAS]
+                            paciente=nome_paciente, data_exame=date_text,
+                            nome_exame=name_str, decisao="ignorado_marcador")
+                        try:
+                            page.keyboard.press("Escape")
+                        except Exception:
+                            pass
+                        time.sleep(0.3)
+                        continue
 
                 # Card sem modalidade no nome pode ser ressonância: decide pelo
                 # título no cabeçalho do laudo (o termo não autoriza RM).
