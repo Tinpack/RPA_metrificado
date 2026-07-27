@@ -80,18 +80,14 @@ def _frame_do_laudo(page):
 
 
 def _log_laudo(page):
-    # [DIAGNÓSTICO] Loga índice/chars/marcador + hash (detecta staleness) + título
-    # do frame do laudo. Puramente log; nenhuma decisão depende disto.
-    import hashlib
+    # Loga a decisão do marcador sobre o laudo (título extraído + veredito). Útil
+    # para auditar por que um laudo foi mantido/pulado. Nenhuma decisão depende disto.
     idx, txt = _frame_do_laudo(page)
     if idx is None:
         print("    [RPA][laudo] frame do laudo nao encontrado")
         return
-    h = hashlib.sha1(_normalizar_laudo(txt).encode("utf-8")).hexdigest()[:8]
-    print(f"    [RPA][laudo] frame={idx} chars={len(txt)} marcador={_texto_indica_skip(txt)} "
-          f"hash={h} valido={_laudo_tem_titulo_valido(txt)} titulo='{_titulo_laudo_principal(txt)[:70]}'")
-    # [DIAGNÓSTICO] texto cru do frame (revela a estrutura real; stdout já é UTF-8)
-    print(f"    [RPA][laudo]   RAW: {_normalizar_laudo(txt)[:600]}")
+    print(f"    [RPA][laudo] valido={_laudo_tem_titulo_valido(txt)} "
+          f"titulo='{_titulo_laudo_principal(txt)[:70]}'")
 
 
 def _texto_laudo_frame(page) -> str:
