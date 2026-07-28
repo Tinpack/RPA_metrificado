@@ -73,15 +73,16 @@ EXAM_REPORT_RM_MARKERS = ["RESSONANCIA MAGNETICA", "RM DE MAMA"]
 EXAM_REPORT_HEADER_DELIM = "INFORMACAO CLINICA"  # daqui pra baixo é corpo do laudo
 EXAM_REPORT_HEADER_MAX = 400                     # fallback se o delimitador sumir
 
-# Marcadores no texto do laudo que indicam que NÃO é um exame diagnóstico e
-# não deve ser enviado para a API. O nome do card às vezes engana (diz "MAMO"
-# mas o laudo é outra coisa), então a checagem é feita no texto do laudo.
+# Marcadores no CORPO do laudo que SINALIZAM (não decidem) uma possível carta de
+# procedimento. O nome do card às vezes engana (diz "US MAMARIA" mas o laudo é
+# "BIOPSIA DE MAMA"), então esses marcadores no corpo disparam uma 2ª checagem.
 #
-# "PREZADO(A) COLEGA": validado no portal — laudos com essa saudação são
-# cartas de encaminhamento/procedimento (localização pré-op, demarcação,
-# biópsia), nunca o laudo diagnóstico em si. Ex.: card "US MAMARIA" cujo
-# Procedimento real era "BIOPSIA DE MAMA". Os laudos diagnósticos reais
-# (mamografia, US) NÃO trazem essa saudação. NÃO remover sem revalidar.
+# ATENÇÃO: "PREZADO(A) COLEGA" sozinho NÃO basta para pular — validado no portal
+# que laudos diagnósticos VÁLIDOS (ecografia/mamografia) TAMBÉM trazem essa
+# saudação (ex.: a ecografia da paciente Janete). Por isso, quando um destes
+# marcadores aparece, a decisão final é pelo TÍTULO do laudo
+# (`_laudo_tem_titulo_valido` em core.py): mantém se o título for exame
+# diagnóstico válido; só pula biópsia/pré-op PUROS (título é o procedimento).
 EXAM_REPORT_EXCLUDE_MARKERS = [
     "LOCALIZACAO PRE-OPERATORIA",
     "LOCALIZACAO PRE OPERATORIA",
