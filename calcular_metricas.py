@@ -212,6 +212,22 @@ def calcular_operacional(run):
     }, tipos
 
 
+# [CUSTO] "Custo por Execução" (ECS Fargate), a partir do bloco `infra` gravado na
+# telemetria pelo report_manager. Os preços vêm na própria telemetria (não aqui),
+# então mudar de região/tamanho de task não exige tocar neste arquivo. Fargate
+# cobra no mínimo 1 min por task -> billed_s = max(60, duração).
+def calcular_custo(run):
+    infra = run.get("infra")
+    if not infra:  # telemetria antiga (sem infra) -> colunas vazias, sem quebrar
+        return {"Custo_Infra_USD": None, "Custo_por_1000_exec": None}
+    dur = infra.get("duracao_s") or run.get("duracao_s") or 0
+    billed_s = max(60.0, float(dur))
+    custo = ((float(infra.get("vcpu", 0)) * float(infra.get("custo_vcpu_hora", 0)))
+             + (float(infra.get("memoria_gb", 0)) * float(infra.get("custo_memoria_gb_hora", 0)))
+             ) * billed_s / 3600.0
+    return {"Custo_Infra_USD": custo, "Custo_por_1000_exec": custo * 1000}
+
+
 # ---------------------------------------------------------------- saída
 COLUNAS_GERAL = [
     "Data", "Hora",
@@ -223,13 +239,16 @@ COLUNAS_GERAL = [
     # Bloco 3
     "Total_Alvos", "Login_OK", "Busca_OK", "Download_unitario_OK", "Download_completo_OK",
     "Taxa_Login", "Taxa_Busca", "Taxa_Download_unitario", "Taxa_Download_completo",
+    # Custo (ECS Fargate)
+    "Custo_Infra_USD", "Custo_por_1000_exec",
 ]
 CONTAGENS = ["Total_Pacientes", "Exames_Sucesso", "Total_Erros", "VP", "FP", "FN",
              "VN", "Total", "Sem_Gabarito", "Fora_Janela", "Total_Alvos", "Login_OK",
              "Busca_OK", "Download_unitario_OK", "Download_completo_OK"]
 TAXAS = ["Taxa_Sucesso_%", "Acuracia", "Precisao", "Revocacao", "F1", "Taxa_Login",
          "Taxa_Busca", "Taxa_Download_unitario", "Taxa_Download_completo",
-         "Tempo_Total_s", "Tempo_Medio_Paciente_s"]
+         "Tempo_Total_s", "Tempo_Medio_Paciente_s",
+         "Custo_Infra_USD", "Custo_por_1000_exec"]
 
 
 def _fmt(v):
@@ -247,6 +266,7 @@ def processar_run(run, gabarito):
     oper, tipos_erro = calcular_operacional(run)
     linha = {"run_id": run.get("run_id", "")}
     linha.update(oper); linha.update(resumo1); linha.update(resumo3)
+    linha.update(calcular_custo(run))
     return linha, detalhe, tipos_erro
 
 

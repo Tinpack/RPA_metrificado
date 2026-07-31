@@ -1,0 +1,11 @@
+{
+  "containerOverrides": [
+    {
+      "name": "clickpalmia-rpa",
+      "command": [
+        "sh", "-c",
+        "echo ===ARVORE===; ls -laR /data/rpa; echo; echo ===TELEMETRIA===; cat /data/rpa/telemetria/*.json 2>/dev/null; echo; echo ===EXECUCAO===; cat /data/rpa/reports/execucao_*.txt 2>/dev/null; echo; echo ===ERROS===; cat /data/rpa/reports/erros_*.json 2>/dev/null"
+      ]
+    }
+  ]
+}

@@ -2,7 +2,9 @@ import os
 import json
 import time
 from datetime import datetime
-from config import REPORTS_DIR
+from config import (
+    REPORTS_DIR, INFRA_VCPU, INFRA_MEM_GB, FARGATE_VCPU_HORA, FARGATE_MEM_GB_HORA,
+)
 
 PENDENTES_IA_LEGACY_FILE = os.path.abspath("./pendentes_ia.json")
 
@@ -186,6 +188,17 @@ class ReportManager:
             "erros": self.erros,  # mesma lista de erros_*.json (p/ "Erros por Tipo" no refino)
             "por_paciente": self.por_paciente,
             "exames": self.exames_eventos,
+            # [CUSTO] Insumos do "Custo por Execução" (ECS Fargate). O cálculo em si
+            # é feito no calcular_metricas.py. vCPU/memória devem bater com a task
+            # definition; duração já é o tempo de parede da execução. O APA
+            # acrescenta um bloco "llm" com tokens/preços, análogo a este.
+            "infra": {
+                "vcpu": INFRA_VCPU,
+                "memoria_gb": INFRA_MEM_GB,
+                "duracao_s": round(self._end - self._start, 3),
+                "custo_vcpu_hora": FARGATE_VCPU_HORA,
+                "custo_memoria_gb_hora": FARGATE_MEM_GB_HORA,
+            },
         }
         path = os.path.join(TELEMETRIA_DIR, f"run_{self.run_id}.json")
         with open(path, 'w', encoding='utf-8') as f:

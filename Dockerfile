@@ -6,7 +6,8 @@ ENV PYTHONUNBUFFERED=1 \
     HEADLESS=true \
     DOWNLOAD_DIR=/data/downloads \
     HISTORY_FILE=/data/historico_downloads.json \
-    REPORTS_DIR=/data/reports
+    REPORTS_DIR=/data/reports \
+    TELEMETRIA_DIR=/data/telemetria
 
 WORKDIR /app
 
@@ -15,6 +16,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . ./
 
-RUN mkdir -p /data/downloads /data/reports
+RUN mkdir -p /data/downloads /data/reports /data/telemetria
 
 CMD ["python", "main.py"]

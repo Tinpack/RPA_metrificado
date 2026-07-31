@@ -4,7 +4,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 IS_DOCKER = os.path.exists('/.dockerenv') or os.getenv('DOCKER_CONTAINER', 'false').lower() == 'true'
-HEADLESS_MODE = os.getenv('HEADLESS', str(IS_DOCKER)).lower() == 'false'
+# Headless a menos que explicitamente "false". No Docker/Fargate (sem X server)
+# TEM que ser headless — HEADLESS=true (default da imagem) cai aqui em True.
+HEADLESS_MODE = os.getenv('HEADLESS', str(IS_DOCKER)).lower() != 'false'
 
 SITE_URL = "https://portalpacientesexames.hmv.org.br/portal/WebLogin.aspx?force_all_browsers=truebr/"
 USER = os.getenv("PORTAL_USER", "")
@@ -18,6 +20,22 @@ SEARCH_BAR_SELECTOR = "sptGeneralDetailsInput"
 DOWNLOAD_DIR = os.path.abspath(os.getenv("DOWNLOAD_DIR", "./downloads"))
 HISTORY_FILE = os.path.abspath(os.getenv("HISTORY_FILE", "./historico_downloads.json"))
 REPORTS_DIR = os.path.abspath(os.getenv("REPORTS_DIR", "./reports"))
+# Conta de serviço do Google Sheets. Configurável por env para o deploy AWS, onde
+# o arquivo é montado via EFS (não embutido na imagem) — pode ficar fora de /app.
+GOOGLE_CREDS_FILE = os.getenv("GOOGLE_CREDS_FILE", "credenciais.json")
+# Se setado (ex.: s3://bucket/rpa), o RPA sobe telemetria+reports pro S3 ao final
+# da execução — pro grupo baixar e rodar as métricas sem acessar o EFS. Vazio =
+# não sobe nada (comportamento local normal). Os PDFs de laudo NÃO sobem (LGPD).
+RESULTS_S3_URI = os.getenv("RESULTS_S3_URI", "")
+
+# Custo de infraestrutura (ECS Fargate) — base do "Custo por Execução" (Seção 2.6
+# do artigo). Os valores de vCPU/memória devem BATER com a task definition; os
+# preços são US East (do documento de deploy). Tudo configurável por env para não
+# precisar reeditar código ao mudar de tamanho de task ou de região.
+INFRA_VCPU = float(os.getenv("INFRA_VCPU", "1.0"))
+INFRA_MEM_GB = float(os.getenv("INFRA_MEM_GB", "2.0"))
+FARGATE_VCPU_HORA = float(os.getenv("FARGATE_VCPU_HORA", "0.04048"))
+FARGATE_MEM_GB_HORA = float(os.getenv("FARGATE_MEM_GB_HORA", "0.004445"))
 
 EXAM_YEAR_CUTOFF = 2024
 EXAM_YEAR_MAX = 2025

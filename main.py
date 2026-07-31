@@ -21,11 +21,37 @@ from core import (
     do_login,
     reset_para_busca,
 )
-from report_manager import ReportManager
-from config import DOWNLOAD_DIR, HISTORY_FILE, HEADLESS_MODE, IS_DOCKER
+from report_manager import ReportManager, TELEMETRIA_DIR
+from config import (
+    DOWNLOAD_DIR, HISTORY_FILE, HEADLESS_MODE, IS_DOCKER, REPORTS_DIR, RESULTS_S3_URI,
+)
 
 load_dotenv()
 SHEET_URL = os.getenv("SHEET_URL")
+
+
+def _subir_resultados_s3(uri):
+    """Sobe telemetria + reports para o S3 (uri = s3://bucket/prefixo), para o grupo
+    baixar e rodar as métricas sem acessar o EFS. Best-effort: falha no upload NÃO
+    derruba a execução. NÃO sobe os PDFs de downloads/ (dados de paciente - LGPD)."""
+    try:
+        import glob
+        import boto3
+        from urllib.parse import urlparse
+        parsed = urlparse(uri)
+        bucket, prefixo = parsed.netloc, parsed.path.strip("/")
+        s3 = boto3.client("s3")
+        enviados = 0
+        for base in (TELEMETRIA_DIR, REPORTS_DIR):
+            nome_base = os.path.basename(base.rstrip("/\\"))
+            for arq in glob.glob(os.path.join(base, "*")):
+                if os.path.isfile(arq):
+                    key = "/".join(p for p in (prefixo, nome_base, os.path.basename(arq)) if p)
+                    s3.upload_file(arq, bucket, key)
+                    enviados += 1
+        print(f"Resultados enviados ao S3 ({uri}): {enviados} arquivo(s)")
+    except Exception as e:
+        print(f"AVISO: falha ao enviar resultados ao S3: {e}")
 
 
 def run_automation():
@@ -126,6 +152,9 @@ def run_automation():
     print(f"Relatório final salvo em: {path_final}")
     print(f"Relatório de erros salvo em: {path_erros}")
     print(f"Telemetria de métricas salva em: {path_tele}")  # [MÉTRICAS]
+
+    if RESULTS_S3_URI:  # deploy AWS: sobe telemetria+reports pro S3 (grupo baixa lá)
+        _subir_resultados_s3(RESULTS_S3_URI)
 
 
 if __name__ == "__main__":

@@ -20,3 +20,10 @@ legado/
 
 # Anotações locais
 FLUXO.md
+log.txt
+
+# Segredos AWS (access keys) — NUNCA versionar
+credencials.txt
+*credencial*
+*accessKeys*.csv
+*.pem

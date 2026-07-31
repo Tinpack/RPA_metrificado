@@ -15,7 +15,7 @@ from data_manager import (
 )
 from config import (
     USER_FIELD_SELECTOR, PASS_FIELD_SELECTOR, LOGIN_BUTTON_SELECTOR,
-    SITE_URL, USER, PASS, DOWNLOAD_DIR, SEARCH_BAR_SELECTOR,
+    SITE_URL, USER, PASS, DOWNLOAD_DIR, SEARCH_BAR_SELECTOR, GOOGLE_CREDS_FILE,
     EXAM_YEAR_CUTOFF, EXAM_YEAR_MAX, EXAM_EXCLUDE_KEYWORDS, EXAM_REPORT_EXCLUDE_MARKERS,
     SEARCH_TIMEOUT, SEARCH_NOT_FOUND_GRACE, SEARCH_SCROLL_CICLOS, STUDY_WAIT_TIMEOUT,
     LAUDO_WAIT_TIMEOUT, REPORT_POPUP_TIMEOUT, REPORT_POPUP_RETRIES,
@@ -297,7 +297,7 @@ def is_html_report(url: str) -> bool:
 
 def read_patients_from_gsheets(sheet_url: str) -> dict:
     try:
-        gc = gspread.service_account(filename="credenciais.json")
+        gc = gspread.service_account(filename=GOOGLE_CREDS_FILE)
         planilha = gc.open_by_url(sheet_url).sheet1
         df = pd.DataFrame(planilha.get_all_records())
         pacientes_filtrados = [{"sheet_row": index + 2, "nome": str(row.get("Por gentileza, informe o seu nome completo:", "")).strip(), "cpf": str(row.get("CPF", "")).strip()}
@@ -309,7 +309,7 @@ def read_patients_from_gsheets(sheet_url: str) -> dict:
 
 def update_sheet_status(sheet_url, row_index, status_value):
     try:
-        gc = gspread.service_account(filename="credenciais.json")
+        gc = gspread.service_account(filename=GOOGLE_CREDS_FILE)
         sh = gc.open_by_url(sheet_url).sheet1
         headers = sh.row_values(1)
         if "STATUS" in headers:
