@@ -53,9 +53,15 @@ REPORT_POPUP_RETRIES = 1         # tentativas extras se o popup não abrir (time
 # US MAMARIA / US AXILAR), gerando PDFs com o mesmo conteúdo clínico. Entre as
 # cópias mudam a data e os identificadores do rodapé (alguns nem aparecem em
 # todas), então a comparação é por SIMILARIDADE do texto, não por hash exato.
+# DEDUP_SIMILARIDADE: com a captura do laudo ESTABILIZADA (_laudo_frame_estavel em
+# core.py), a cópia real do mesmo laudo pontua ~0,98 de forma consistente e um stub
+# distinto (ex.: US AXILAR "Somente relatório", quase vazio) fica ~0,89 — logo 0,90
+# separa os dois com folga. NÃO baixar daqui: abaixo de 0,90 o stub (a manter) colide
+# com cópias, e o problema de vazamento era captura instável (resolvido), não o número.
 DEDUP_SIMILARIDADE = 0.90   # ratio mínimo (difflib) para considerar o mesmo laudo
 DEDUP_JANELA_DIAS = 7       # só deduplica cards a <= N dias (cópias ficam em 1-4)
-DEDUP_LOG_RATIO_MIN = 0.85  # loga o ratio quando ficar perto mas abaixo do limiar
+DEDUP_LOG_RATIO_MIN = 0.70  # loga ratios a partir daqui (near-miss abaixo do limiar) e
+                            # serve de corte do quick_ratio. Só afeta LOG, não a decisão.
 
 EXAM_EXCLUDE_KEYWORDS = [
     "LOCALIZACAO PRE",

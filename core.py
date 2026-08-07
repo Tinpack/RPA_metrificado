@@ -106,6 +106,29 @@ def _texto_laudo_frame(page) -> str:
     return melhor
 
 
+def _laudo_frame_estavel(page, timeout: float = LAUDO_WAIT_TIMEOUT) -> str:
+    # Texto do FRAME do laudo (via _frame_do_laudo, que exclui a UI do portal),
+    # capturado só depois de ESTABILIZAR (~0,5s sem mudar). É a chave da dedup:
+    # ler solto/parcial fazia o ratio da MESMA cópia oscilar (0,98 numa run, <0,90
+    # noutra) e cópia real vazava (caso Consuelo). Estabilizar deixa a captura
+    # determinística -> cópia real ~0,98 estável, stub ~0,89 -> 0,90 separa os dois.
+    t0 = time.time()
+    ultimo = None
+    estavel_desde = None
+    while time.time() - t0 < timeout:
+        _, t = _frame_do_laudo(page)
+        if t and t == ultimo:
+            if estavel_desde is not None and (time.time() - estavel_desde) >= 0.5:
+                return t
+            if estavel_desde is None:
+                estavel_desde = time.time()
+        else:
+            estavel_desde = None
+        ultimo = t
+        time.sleep(0.1)
+    return _frame_do_laudo(page)[1]
+
+
 def _normalizar_laudo(texto: str) -> str:
     return " ".join(remove_accents(texto or "").upper().split())
 
@@ -637,15 +660,16 @@ def process_patient_exams(page, context, nome_paciente: str, cpf_paciente: str, 
                 # Cópia do mesmo laudo já baixado nesta run/paciente? -> pula.
                 # Compara por similaridade (data e IDs do rodapé mudam entre as
                 # cópias, e alguns nem aparecem em todas -> hash exato não serve).
-                laudo_norm = _normalizar_laudo(_texto_laudo_frame(page))
+                laudo_norm = _normalizar_laudo(_laudo_frame_estavel(page))
                 data_atual = _data_card(date_text)
                 dup_nome = None
+                dup_ratio = None
                 for texto_ant, nome_ant, data_ant in laudos_baixados:
                     if not _dentro_janela_dias(data_ant, data_atual, DEDUP_JANELA_DIAS):
                         continue
                     ratio = _ratio_laudo(texto_ant, laudo_norm, DEDUP_LOG_RATIO_MIN)
                     if ratio >= DEDUP_SIMILARIDADE:
-                        dup_nome = nome_ant
+                        dup_nome, dup_ratio = nome_ant, ratio
                         break
                     if ratio >= DEDUP_LOG_RATIO_MIN:  # perto do limiar: loga p/ calibrar
                         print(f"    [RPA][dedup] '{name_str}' vs '{nome_ant}': "
@@ -653,7 +677,7 @@ def process_patient_exams(page, context, nome_paciente: str, cpf_paciente: str, 
 
                 if dup_nome:
                     print(f"    [RPA] Ignorado (cópia do mesmo laudo já baixado "
-                          f"'{dup_nome}'): {name_str}")
+                          f"'{dup_nome}' ratio={dup_ratio:.3f}): {name_str}")
                     write_download_history(exam_history_id)
                     report.registrar_ignorado(nome_paciente)
                     report.atualizar_decisao_exame(  # [MÉTRICAS]
