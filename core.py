@@ -19,10 +19,17 @@ from config import (
     EXAM_YEAR_CUTOFF, EXAM_YEAR_MAX, EXAM_EXCLUDE_KEYWORDS, EXAM_REPORT_EXCLUDE_MARKERS,
     SEARCH_TIMEOUT, SEARCH_NOT_FOUND_GRACE, SEARCH_SCROLL_CICLOS, STUDY_WAIT_TIMEOUT,
     LAUDO_WAIT_TIMEOUT, REPORT_POPUP_TIMEOUT, REPORT_POPUP_RETRIES,
-    DEDUP_SIMILARIDADE, DEDUP_JANELA_DIAS, DEDUP_LOG_RATIO_MIN,
+    DEDUP_SIMILARIDADE, DEDUP_JANELA_DIAS, DEDUP_LOG_RATIO_MIN, DEBUG_DEDUP,
     EXAM_MODALIDADES_PROIBIDAS, EXAM_PROCEDIMENTOS_PROIBIDOS,
     EXAM_REPORT_RM_MARKERS, EXAM_REPORT_HEADER_DELIM, EXAM_REPORT_HEADER_MAX,
 )
+
+
+def _hash8(texto: str) -> str:
+    # [DIAGNÓSTICO] Identidade curta do laudo, para comparar capturas entre si sem
+    # jogar conteúdo clínico no CloudWatch.
+    import hashlib
+    return hashlib.sha1((texto or "").encode("utf-8")).hexdigest()[:8]
 
 
 def check_exam_date(date_str):
@@ -79,6 +86,43 @@ def _frame_do_laudo(page):
     return melhor_i, melhor_t
 
 
+def _dump_frames(page, motivo):
+    """[DIAGNÓSTICO] Inventário de TODOS os frames no instante da captura.
+
+    Existe para separar duas causas que hoje ficam idênticas no log: o frame do laudo
+    estava VAZIO, ou `_frame_do_laudo` escolheu o frame ERRADO? Ele devolve o maior
+    texto entre os frames (pulando o #0, que é a UI): se o relatório ainda não anexou,
+    sobra uma casca pequena — e é assim que nasce a captura de 31 chars em branco.
+
+    Imprime índice, tamanho do texto (cru e normalizado) e URL de cada frame; para os
+    frames pequenos, despeja `repr()` do texto e um trecho do HTML, que é onde aparece
+    spinner/placeholder. Só roda com DEBUG_DEDUP e não influencia decisão nenhuma."""
+    try:
+        frames = list(page.frames)
+    except Exception as e:
+        print(f"    [RPA][frames] nao consegui listar frames: {type(e).__name__}")
+        return
+    print(f"    [RPA][frames] === {motivo}: {len(frames)} frame(s) ===")
+    for i, fr in enumerate(frames):
+        try:
+            texto = fr.inner_text("body")
+        except Exception as e:
+            print(f"    [RPA][frames]   #{i} <falha ao ler body: {type(e).__name__}> "
+                  f"url={(getattr(fr, 'url', '') or '')[:100]}")
+            continue
+        norm = _normalizar_laudo(texto)
+        print(f"    [RPA][frames]   #{i} chars={len(texto)} norm={len(norm)} "
+              f"hash={_hash8(texto)} url={(fr.url or '')[:100]}")
+        if len(texto) < 200:  # candidato a casca: mostra o conteúdo exato
+            print(f"    [RPA][frames]      texto={texto[:200]!r}")
+            try:
+                html = fr.content()
+                print(f"    [RPA][frames]      html_len={len(html)} inicio={html[:300]!r}")
+            except Exception as e:
+                print(f"    [RPA][frames]      <falha ao ler html: {type(e).__name__}>")
+    print(f"    [RPA][frames] === fim do dump ===")
+
+
 def _log_laudo(page):
     # Loga a decisão do marcador sobre o laudo (título extraído + veredito). Útil
     # para auditar por que um laudo foi mantido/pulado. Nenhuma decisão depende disto.
@@ -115,18 +159,38 @@ def _laudo_frame_estavel(page, timeout: float = LAUDO_WAIT_TIMEOUT) -> str:
     t0 = time.time()
     ultimo = None
     estavel_desde = None
+    amostras = 0
+
+    def _finalizar(texto, estabilizou, idx=None):
+        # [DIAGNÓSTICO] Ponto único de saída, para o log valer nos dois caminhos.
+        if DEBUG_DEDUP:
+            print(f"    [RPA][estavel] estabilizou={estabilizou} "
+                  f"elapsed={time.time() - t0:.2f}s amostras={amostras} "
+                  f"frame={idx} chars={len(texto or '')} hash={_hash8(texto)}")
+            # Sem conteúdo útil = o caso que faz a dedup falhar (ratio 0.0 -> cópia
+            # baixada -> FP). Só aqui vale o custo do dump completo dos frames.
+            if len(_normalizar_laudo(texto)) < 20:
+                print(f"    [RPA][estavel] CAPTURA SEM CONTEUDO texto={(texto or '')[:200]!r}")
+                _dump_frames(page, "captura sem conteudo util")
+        return texto
+
     while time.time() - t0 < timeout:
-        _, t = _frame_do_laudo(page)
+        idx, t = _frame_do_laudo(page)
+        amostras += 1
         if t and t == ultimo:
             if estavel_desde is not None and (time.time() - estavel_desde) >= 0.5:
-                return t
+                return _finalizar(t, True, idx)
             if estavel_desde is None:
                 estavel_desde = time.time()
         else:
             estavel_desde = None
         ultimo = t
         time.sleep(0.1)
-    return _frame_do_laudo(page)[1]
+    # Estourou o teto sem estabilizar: devolve o que houver (possivelmente parcial).
+    # [DIAGNÓSTICO] Este caminho era MUDO — e continua sendo o canário: hoje ele
+    # nunca dispara (0 em 191 capturas medidas).
+    idx_final, final = _frame_do_laudo(page)
+    return _finalizar(final, False, idx_final)
 
 
 def _normalizar_laudo(texto: str) -> str:
@@ -136,10 +200,18 @@ def _normalizar_laudo(texto: str) -> str:
 def _ratio_laudo(a: str, b: str, limiar: float) -> float:
     # Similaridade entre dois laudos normalizados. quick_ratio() é um limite
     # SUPERIOR barato: se já fica abaixo do limiar, nem calcula o ratio real.
+    # [DIAGNÓSTICO] Os dois 0.0 abaixo têm causas MUITO diferentes (captura vazia vs.
+    # laudos realmente distintos) e eram indistinguíveis no log.
     if not a or not b:
+        if DEBUG_DEDUP:
+            print(f"    [RPA][dedup]   ratio=0.000 motivo=vazio "
+                  f"(anterior={len(a or '')} chars, atual={len(b or '')} chars)")
         return 0.0
     sm = difflib.SequenceMatcher(None, a, b)
-    if sm.quick_ratio() < limiar:
+    qr = sm.quick_ratio()
+    if qr < limiar:
+        if DEBUG_DEDUP:
+            print(f"    [RPA][dedup]   ratio=0.000 motivo=quick_ratio<{limiar} (qr={qr:.3f})")
         return 0.0
     return sm.ratio()
 
@@ -664,16 +736,31 @@ def process_patient_exams(page, context, nome_paciente: str, cpf_paciente: str, 
                 data_atual = _data_card(date_text)
                 dup_nome = None
                 dup_ratio = None
+                # [DIAGNÓSTICO] Acompanha por que a dedup NÃO casou: hoje um ratio
+                # abaixo de DEDUP_LOG_RATIO_MIN some do log e a cópia é baixada.
+                _melhor_ratio, _melhor_nome, _fora_janela = 0.0, None, 0
                 for texto_ant, nome_ant, data_ant in laudos_baixados:
                     if not _dentro_janela_dias(data_ant, data_atual, DEDUP_JANELA_DIAS):
+                        _fora_janela += 1
                         continue
                     ratio = _ratio_laudo(texto_ant, laudo_norm, DEDUP_LOG_RATIO_MIN)
+                    if ratio > _melhor_ratio:
+                        _melhor_ratio, _melhor_nome = ratio, nome_ant
                     if ratio >= DEDUP_SIMILARIDADE:
                         dup_nome, dup_ratio = nome_ant, ratio
                         break
                     if ratio >= DEDUP_LOG_RATIO_MIN:  # perto do limiar: loga p/ calibrar
                         print(f"    [RPA][dedup] '{name_str}' vs '{nome_ant}': "
                               f"ratio={ratio:.3f} (nao deduplicado)")
+
+                if DEBUG_DEDUP:
+                    # Resumo SEMPRE emitido (mesmo com ratio 0.0), que é o caso cego hoje.
+                    print(f"    [RPA][dedup] '{name_str}': "
+                          f"veredito={'DUP' if dup_nome else 'NAO-DUP'} "
+                          f"chars={len(laudo_norm)} hash={_hash8(laudo_norm)} "
+                          f"cands={len(laudos_baixados)} fora_janela={_fora_janela} "
+                          f"ratio_max={_melhor_ratio:.3f} vs='{(_melhor_nome or '-')[:45]}' "
+                          f"limiar={DEDUP_SIMILARIDADE}")
 
                 if dup_nome:
                     print(f"    [RPA] Ignorado (cópia do mesmo laudo já baixado "

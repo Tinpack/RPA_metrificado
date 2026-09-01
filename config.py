@@ -63,6 +63,23 @@ DEDUP_JANELA_DIAS = 7       # só deduplica cards a <= N dias (cópias ficam em 
 DEDUP_LOG_RATIO_MIN = 0.70  # loga ratios a partir daqui (near-miss abaixo do limiar) e
                             # serve de corte do quick_ratio. Só afeta LOG, não a decisão.
 
+# [DIAGNÓSTICO] Liga o log detalhado da dedup e da captura do laudo. Existe porque um
+# ratio 0.0 por captura parcial/vazia hoje passa em silêncio (fica abaixo do
+# DEDUP_LOG_RATIO_MIN) e a cópia acaba baixada -> vira FP contra o gabarito. Fenômeno
+# não-determinístico e visto só na AWS (container mais lento/headless).
+# Desligado por padrão; liga por execução com deploy/debug-dedup-overrides.json,
+# que injeta só o `environment` da task (o CMD da imagem segue intacto).
+# NUNCA muda decisão: é apenas print.
+DEBUG_DEDUP = os.getenv("DEBUG_DEDUP", "") == "1"
+
+# [DIAGNÓSTICO] Zera o historico_downloads.json no INÍCIO da execução. Existe para a
+# reprodução do bug da dedup: com o histórico populado os exames saem como
+# `ja_no_historico`, o download nem acontece e o caminho da dedup não executa — o bug
+# nunca aparece. Guarda um .bak ao lado antes de zerar. Separado do DEBUG_DEDUP porque
+# um é log e o outro MEXE em estado; os dois vêm juntos em
+# deploy/debug-dedup-overrides.json só por conveniência.
+RESET_HISTORICO = os.getenv("RESET_HISTORICO", "") == "1"
+
 EXAM_EXCLUDE_KEYWORDS = [
     "LOCALIZACAO PRE",
     "PRE CIRURGICA",
