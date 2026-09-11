@@ -15,14 +15,21 @@ from data_manager import (
 )
 from config import (
     USER_FIELD_SELECTOR, PASS_FIELD_SELECTOR, LOGIN_BUTTON_SELECTOR,
-    SITE_URL, USER, PASS, DOWNLOAD_DIR, SEARCH_BAR_SELECTOR,
+    SITE_URL, USER, PASS, DOWNLOAD_DIR, SEARCH_BAR_SELECTOR, GOOGLE_CREDS_FILE,
     EXAM_YEAR_CUTOFF, EXAM_YEAR_MAX, EXAM_EXCLUDE_KEYWORDS, EXAM_REPORT_EXCLUDE_MARKERS,
     SEARCH_TIMEOUT, SEARCH_NOT_FOUND_GRACE, SEARCH_SCROLL_CICLOS, STUDY_WAIT_TIMEOUT,
     LAUDO_WAIT_TIMEOUT, REPORT_POPUP_TIMEOUT, REPORT_POPUP_RETRIES,
-    DEDUP_SIMILARIDADE, DEDUP_JANELA_DIAS, DEDUP_LOG_RATIO_MIN,
+    DEDUP_SIMILARIDADE, DEDUP_JANELA_DIAS, DEDUP_LOG_RATIO_MIN, DEBUG_DEDUP,
     EXAM_MODALIDADES_PROIBIDAS, EXAM_PROCEDIMENTOS_PROIBIDOS,
     EXAM_REPORT_RM_MARKERS, EXAM_REPORT_HEADER_DELIM, EXAM_REPORT_HEADER_MAX,
 )
+
+
+def _hash8(texto: str) -> str:
+    # [DIAGNÓSTICO] Identidade curta do laudo, para comparar capturas entre si sem
+    # jogar conteúdo clínico no CloudWatch.
+    import hashlib
+    return hashlib.sha1((texto or "").encode("utf-8")).hexdigest()[:8]
 
 
 def check_exam_date(date_str):
@@ -64,9 +71,16 @@ def _texto_laudo(page) -> str:
 
 
 def _frame_do_laudo(page):
-    # [DIAGNÓSTICO] Aponta qual frame contém o laudo (maior frame, excluindo o
-    # frame principal da UI #0). Retorna (indice, texto) ou (None, "").
-    melhor_i, melhor_t = None, ""
+    # Aponta qual frame contém o laudo (maior frame, excluindo o frame principal
+    # da UI #0). Retorna (indice, texto) ou (None, "").
+    #
+    # O ranking é por texto NORMALIZADO (sem espaço em branco), não pelo tamanho
+    # cru. A casca do visualizador (LVClient/DefaultLightViewer.aspx) devolve 31
+    # caracteres de puro `\t\n` — e vencia o laudo real quando este era menor:
+    # o caso "Laudo com Us mamária" tem 23 chars crus, perdia por 31>23, e o RPA
+    # capturava a casca. Normalizado, a casca vale 0 e nunca ganha. Mede o mesmo
+    # que a dedup compara depois (_normalizar_laudo), então os dois concordam.
+    melhor_i, melhor_t, melhor_n = None, "", 0
     for i, fr in enumerate(page.frames):
         if i == 0:
             continue  # frame principal = UI do portal (lista de cards, abas)
@@ -74,9 +88,47 @@ def _frame_do_laudo(page):
             t = fr.inner_text("body")
         except Exception:
             continue
-        if len(t) > len(melhor_t):
-            melhor_i, melhor_t = i, t
+        n = len(_normalizar_laudo(t))
+        if n > melhor_n:
+            melhor_i, melhor_t, melhor_n = i, t, n
     return melhor_i, melhor_t
+
+
+def _dump_frames(page, motivo):
+    """[DIAGNÓSTICO] Inventário de TODOS os frames no instante da captura.
+
+    Existe para separar duas causas que hoje ficam idênticas no log: o frame do laudo
+    estava VAZIO, ou `_frame_do_laudo` escolheu o frame ERRADO? Ele devolve o maior
+    texto entre os frames (pulando o #0, que é a UI): se o relatório ainda não anexou,
+    sobra uma casca pequena — e é assim que nasce a captura de 31 chars em branco.
+
+    Imprime índice, tamanho do texto (cru e normalizado) e URL de cada frame; para os
+    frames pequenos, despeja `repr()` do texto e um trecho do HTML, que é onde aparece
+    spinner/placeholder. Só roda com DEBUG_DEDUP e não influencia decisão nenhuma."""
+    try:
+        frames = list(page.frames)
+    except Exception as e:
+        print(f"    [RPA][frames] nao consegui listar frames: {type(e).__name__}")
+        return
+    print(f"    [RPA][frames] === {motivo}: {len(frames)} frame(s) ===")
+    for i, fr in enumerate(frames):
+        try:
+            texto = fr.inner_text("body")
+        except Exception as e:
+            print(f"    [RPA][frames]   #{i} <falha ao ler body: {type(e).__name__}> "
+                  f"url={(getattr(fr, 'url', '') or '')[:100]}")
+            continue
+        norm = _normalizar_laudo(texto)
+        print(f"    [RPA][frames]   #{i} chars={len(texto)} norm={len(norm)} "
+              f"hash={_hash8(texto)} url={(fr.url or '')[:100]}")
+        if len(texto) < 200:  # candidato a casca: mostra o conteúdo exato
+            print(f"    [RPA][frames]      texto={texto[:200]!r}")
+            try:
+                html = fr.content()
+                print(f"    [RPA][frames]      html_len={len(html)} inicio={html[:300]!r}")
+            except Exception as e:
+                print(f"    [RPA][frames]      <falha ao ler html: {type(e).__name__}>")
+    print(f"    [RPA][frames] === fim do dump ===")
 
 
 def _log_laudo(page):
@@ -94,29 +146,85 @@ def _texto_laudo_frame(page) -> str:
     # Só o conteúdo do laudo (frames), SEM o body da página: o body traz toda a
     # UI do portal (lista de cards, abas) e dois exames diferentes ficariam
     # ~95% parecidos só por isso, inviabilizando a comparação por similaridade.
-    # Heurística: o maior texto entre os frames é o relatório.
-    melhor = ""
-    for frame in page.frames:
-        try:
-            t = frame.inner_text("body")
-        except Exception:
-            continue
-        if len(t) > len(melhor):
-            melhor = t
-    return melhor
+    # Heurística: o maior texto entre os frames é o relatório — medido pelo texto
+    # NORMALIZADO, senão a casca do visualizador (31 chars de `\t\n`) vence um
+    # laudo curto de verdade. Mesmo critério de _frame_do_laudo.
+    #
+    # NOTA: hoje sem chamador; mantido corrigido para não replantar o defeito.
+    return _frame_do_laudo(page)[1]
+
+
+def _laudo_frame_estavel(page, timeout: float = LAUDO_WAIT_TIMEOUT) -> str:
+    # Texto do FRAME do laudo (via _frame_do_laudo, que exclui a UI do portal),
+    # capturado só depois de ESTABILIZAR (~0,5s sem mudar). É a chave da dedup:
+    # ler solto/parcial fazia o ratio da MESMA cópia oscilar (0,98 numa run, <0,90
+    # noutra) e cópia real vazava (caso Consuelo). Estabilizar deixa a captura
+    # determinística -> cópia real ~0,98 estável, stub ~0,89 -> 0,90 separa os dois.
+    t0 = time.time()
+    ultimo = None
+    estavel_desde = None
+    amostras = 0
+
+    def _finalizar(texto, estabilizou, idx=None):
+        # [DIAGNÓSTICO] Ponto único de saída, para o log valer nos dois caminhos.
+        if DEBUG_DEDUP:
+            print(f"    [RPA][estavel] estabilizou={estabilizou} "
+                  f"elapsed={time.time() - t0:.2f}s amostras={amostras} "
+                  f"frame={idx} chars={len(texto or '')} hash={_hash8(texto)}")
+            # Sem conteúdo útil = o caso que faz a dedup falhar (ratio 0.0 -> cópia
+            # baixada -> FP). Só aqui vale o custo do dump completo dos frames.
+            if len(_normalizar_laudo(texto)) < 20:
+                print(f"    [RPA][estavel] CAPTURA SEM CONTEUDO texto={(texto or '')[:200]!r}")
+                _dump_frames(page, "captura sem conteudo util")
+        return texto
+
+    while time.time() - t0 < timeout:
+        idx, t = _frame_do_laudo(page)
+        amostras += 1
+        # Exige CONTEÚDO, não só imobilidade: uma casca em branco fica parada e
+        # "estabilizava" em ~0,67s, sendo aceita como laudo. Enquanto o frame real
+        # não renderiza, segue esperando (sobram ~3,3s dos 4s, antes ociosos).
+        if t and _normalizar_laudo(t) and t == ultimo:
+            if estavel_desde is not None and (time.time() - estavel_desde) >= 0.5:
+                return _finalizar(t, True, idx)
+            if estavel_desde is None:
+                estavel_desde = time.time()
+        else:
+            estavel_desde = None
+        ultimo = t
+        time.sleep(0.1)
+    # Estourou o teto sem estabilizar: devolve o que houver (possivelmente parcial).
+    # [DIAGNÓSTICO] Este caminho era MUDO — e continua sendo o canário: hoje ele
+    # nunca dispara (0 em 191 capturas medidas).
+    idx_final, final = _frame_do_laudo(page)
+    return _finalizar(final, False, idx_final)
+
+
+# Invisíveis que o str.split() NÃO trata como espaço: o laudo do portal começa com
+# BOM, então um frame ainda em branco normalizava para "﻿" — não-vazio — e passava
+# pela checagem de "tem conteúdo". Removidos antes de normalizar.
+_INVISIVEIS = str.maketrans("", "", "﻿​‌‍⁠")
 
 
 def _normalizar_laudo(texto: str) -> str:
-    return " ".join(remove_accents(texto or "").upper().split())
+    return " ".join(remove_accents(texto or "").translate(_INVISIVEIS).upper().split())
 
 
 def _ratio_laudo(a: str, b: str, limiar: float) -> float:
     # Similaridade entre dois laudos normalizados. quick_ratio() é um limite
     # SUPERIOR barato: se já fica abaixo do limiar, nem calcula o ratio real.
+    # [DIAGNÓSTICO] Os dois 0.0 abaixo têm causas MUITO diferentes (captura vazia vs.
+    # laudos realmente distintos) e eram indistinguíveis no log.
     if not a or not b:
+        if DEBUG_DEDUP:
+            print(f"    [RPA][dedup]   ratio=0.000 motivo=vazio "
+                  f"(anterior={len(a or '')} chars, atual={len(b or '')} chars)")
         return 0.0
     sm = difflib.SequenceMatcher(None, a, b)
-    if sm.quick_ratio() < limiar:
+    qr = sm.quick_ratio()
+    if qr < limiar:
+        if DEBUG_DEDUP:
+            print(f"    [RPA][dedup]   ratio=0.000 motivo=quick_ratio<{limiar} (qr={qr:.3f})")
         return 0.0
     return sm.ratio()
 
@@ -297,7 +405,7 @@ def is_html_report(url: str) -> bool:
 
 def read_patients_from_gsheets(sheet_url: str) -> dict:
     try:
-        gc = gspread.service_account(filename="credenciais.json")
+        gc = gspread.service_account(filename=GOOGLE_CREDS_FILE)
         planilha = gc.open_by_url(sheet_url).sheet1
         df = pd.DataFrame(planilha.get_all_records())
         pacientes_filtrados = [{"sheet_row": index + 2, "nome": str(row.get("Por gentileza, informe o seu nome completo:", "")).strip(), "cpf": str(row.get("CPF", "")).strip()}
@@ -309,7 +417,7 @@ def read_patients_from_gsheets(sheet_url: str) -> dict:
 
 def update_sheet_status(sheet_url, row_index, status_value):
     try:
-        gc = gspread.service_account(filename="credenciais.json")
+        gc = gspread.service_account(filename=GOOGLE_CREDS_FILE)
         sh = gc.open_by_url(sheet_url).sheet1
         headers = sh.row_values(1)
         if "STATUS" in headers:
@@ -358,17 +466,23 @@ def reset_para_busca(page):
         search = page.locator(f"#{SEARCH_BAR_SELECTOR}")
         search.wait_for(state="visible", timeout=8000)
         search.first.fill("")
-        return
-    except Exception:
-        pass
+        return True
+    except Exception as e:
+        # Antes era `except: pass` — falhar aqui deixava a tela no estado da paciente
+        # anterior e a busca seguinte lia a tabela velha, sem ninguém saber por quê.
+        print(f"    [RPA][reset] reset leve falhou ({type(e).__name__}: {e}); tentando re-login")
 
     # Fallback: sessão caiu -> re-login completo.
     try:
         do_login(page)
         page.locator(f"#{SEARCH_BAR_SELECTOR}").wait_for(state="visible", timeout=15000)
         page.locator(f"#{SEARCH_BAR_SELECTOR}").first.fill("")
-    except Exception:
-        pass
+        print("    [RPA][reset] re-login concluido")
+        return True
+    except Exception as e:
+        print(f"    [RPA][reset] re-login TAMBEM falhou ({type(e).__name__}: {e}) — "
+              f"a proxima busca pode ler a tabela da paciente anterior")
+        return False
 
 
 def _ler_linhas_resultado(page):
@@ -406,11 +520,30 @@ def _badge_resultado(page):
     return int(m.group(1)) if m else None
 
 
+def _assinatura_resultado(page):
+    # Identidade do conteúdo atual da tabela de resultados, para detectar quando ela
+    # troca de uma busca para a outra. None = tabela vazia/ilegível.
+    try:
+        linhas = _ler_linhas_resultado(page)
+    except Exception:
+        return None
+    if not linhas:
+        return None
+    return tuple(normalize_name(n) for n, _ in linhas)
+
+
 def buscar_paciente(page, nome_paciente: str, timeout: float = SEARCH_TIMEOUT,
                     grace: float = SEARCH_NOT_FOUND_GRACE) -> dict:
     alvo = normalize_name(nome_paciente)
     search = page.locator(f"#{SEARCH_BAR_SELECTOR}")
     search.wait_for(state="visible", timeout=15000)
+
+    # Assinatura da tabela ANTES de buscar. Sem isso, uma busca que não dispara
+    # deixa na tela o resultado da paciente ANTERIOR, e o laço abaixo passava os
+    # 10s relendo essa linha velha até declarar "não encontrada" — zerando o
+    # STATUS de quem existe no portal (casos Susan/Cinara lendo 'Janice').
+    antes = _assinatura_resultado(page)
+
     search.click()
     search.fill("")
     search.fill(remove_accents(nome_paciente))
@@ -422,8 +555,17 @@ def buscar_paciente(page, nome_paciente: str, timeout: float = SEARCH_TIMEOUT,
     linhas_vistas = []       # maior conjunto de linhas já lido (p/ diagnóstico)
     ultimo_total = 0         # p/ detectar quando a lista para de crescer
     ciclos_sem_crescer = 0
+    atualizou = (antes is None)   # sem tabela antes = nada de velho para confundir
     while time.time() < deadline:
         linhas = _ler_linhas_resultado(page)
+        # Só confia no conteúdo depois que a tabela deixar de ser a da busca
+        # anterior. Enquanto for idêntica, é "ainda não atualizou", não "não achou".
+        if not atualizou:
+            if _assinatura_resultado(page) != antes:
+                atualizou = True
+            else:
+                time.sleep(0.25)
+                continue
         if linhas:
             viu_linhas = True
             if len(linhas) > len(linhas_vistas):
@@ -446,7 +588,8 @@ def buscar_paciente(page, nome_paciente: str, timeout: float = SEARCH_TIMEOUT,
         # Saída rápida: já deu tempo da busca rodar e o badge mostra 0 com
         # a tabela vazia -> paciente não existe (evita esperar o timeout todo).
         elif (time.time() - inicio) > grace and _badge_resultado(page) == 0:
-            return {"index": None, "id_cell": None, "viu_linhas": viu_linhas}
+            return {"index": None, "id_cell": None, "viu_linhas": viu_linhas,
+                    "causa": "busca_vazia", "linhas_lidas": [], "badge": 0}
         time.sleep(0.25)
 
     # [DIAGNÓSTICO] Não achou: mostra o que foi lido para distinguir "lista
@@ -457,7 +600,20 @@ def buscar_paciente(page, nome_paciente: str, timeout: float = SEARCH_TIMEOUT,
         for i, (nome_txt, _) in enumerate(linhas_vistas, 1):
             print(f"        {i:02d} '{nome_txt.strip()[:52]}' -> '{normalize_name(nome_txt)[:52]}'")
 
-    return {"index": None, "id_cell": None, "viu_linhas": viu_linhas}
+    # Tipifica o desfecho: "não bateu com nenhuma linha" antes cobria dois casos
+    # OPOSTOS — grafia divergente na planilha (dado a corrigir) e tabela velha
+    # (bug do RPA). Sem separar, o erros_*.json não permitia distinguir.
+    if not atualizou:
+        causa = "busca_nao_atualizou"
+    elif viu_linhas:
+        causa = "nome_divergente"
+    elif _badge_resultado(page) == 0:
+        causa = "busca_vazia"
+    else:
+        causa = "busca_timeout"
+    return {"index": None, "id_cell": None, "viu_linhas": viu_linhas,
+            "causa": causa, "linhas_lidas": [n.strip()[:60] for n, _ in linhas_vistas],
+            "badge": _badge_resultado(page)}
 
 
 def process_patient_exams(page, context, nome_paciente: str, cpf_paciente: str, report) -> dict:
@@ -484,16 +640,29 @@ def process_patient_exams(page, context, nome_paciente: str, cpf_paciente: str, 
         if resultado_busca["index"] is None:
             stats["status"] = "not_found"
             report.registrar_paciente_nao_encontrado(nome_paciente)
-            motivo = (
-                "Nome do paciente não bateu com nenhuma linha da tabela de busca."
-                if resultado_busca["viu_linhas"]
-                else "Paciente não retornado pela busca no portal."
-            )
+            # Causa tipificada pela busca + a EVIDÊNCIA que antes só existia no log
+            # [RPA][busca]. Com isso o erros_*.json basta sozinho para diagnosticar:
+            # busca_nao_atualizou = bug do RPA (repor STATUS na planilha);
+            # nome_divergente = corrigir a grafia; busca_vazia = não está no portal.
+            causa = resultado_busca.get("causa", "patient_not_found")
+            motivos = {
+                "busca_nao_atualizou": ("A tabela de resultados continuou com a busca "
+                                        "ANTERIOR; a paciente NAO foi realmente procurada."),
+                "nome_divergente": ("Tabela atualizou, mas nenhuma linha bateu com o nome "
+                                    "(provavel diferenca de grafia na planilha)."),
+                "busca_vazia": "Busca retornou vazia no portal (paciente nao encontrada).",
+                "busca_timeout": "Busca sem desfecho conclusivo dentro do tempo limite.",
+            }
+            lidas = resultado_busca.get("linhas_lidas") or []
+            motivo = motivos.get(causa, "Paciente não retornado pela busca no portal.")
+            if lidas:
+                motivo += f" Linhas lidas ({len(lidas)}): {'; '.join(lidas[:5])}"
+            motivo += f" [badge={resultado_busca.get('badge')}]"
             report.registrar_erro(
                 paciente=nome_paciente, cpf=cpf_paciente,
                 data_exame="", nome_exame="",
                 motivo=motivo,
-                etapa="patient_not_found",
+                etapa=causa,
             )
             return stats
 
@@ -637,23 +806,39 @@ def process_patient_exams(page, context, nome_paciente: str, cpf_paciente: str, 
                 # Cópia do mesmo laudo já baixado nesta run/paciente? -> pula.
                 # Compara por similaridade (data e IDs do rodapé mudam entre as
                 # cópias, e alguns nem aparecem em todas -> hash exato não serve).
-                laudo_norm = _normalizar_laudo(_texto_laudo_frame(page))
+                laudo_norm = _normalizar_laudo(_laudo_frame_estavel(page))
                 data_atual = _data_card(date_text)
                 dup_nome = None
+                dup_ratio = None
+                # [DIAGNÓSTICO] Acompanha por que a dedup NÃO casou: hoje um ratio
+                # abaixo de DEDUP_LOG_RATIO_MIN some do log e a cópia é baixada.
+                _melhor_ratio, _melhor_nome, _fora_janela = 0.0, None, 0
                 for texto_ant, nome_ant, data_ant in laudos_baixados:
                     if not _dentro_janela_dias(data_ant, data_atual, DEDUP_JANELA_DIAS):
+                        _fora_janela += 1
                         continue
                     ratio = _ratio_laudo(texto_ant, laudo_norm, DEDUP_LOG_RATIO_MIN)
+                    if ratio > _melhor_ratio:
+                        _melhor_ratio, _melhor_nome = ratio, nome_ant
                     if ratio >= DEDUP_SIMILARIDADE:
-                        dup_nome = nome_ant
+                        dup_nome, dup_ratio = nome_ant, ratio
                         break
                     if ratio >= DEDUP_LOG_RATIO_MIN:  # perto do limiar: loga p/ calibrar
                         print(f"    [RPA][dedup] '{name_str}' vs '{nome_ant}': "
                               f"ratio={ratio:.3f} (nao deduplicado)")
 
+                if DEBUG_DEDUP:
+                    # Resumo SEMPRE emitido (mesmo com ratio 0.0), que é o caso cego hoje.
+                    print(f"    [RPA][dedup] '{name_str}': "
+                          f"veredito={'DUP' if dup_nome else 'NAO-DUP'} "
+                          f"chars={len(laudo_norm)} hash={_hash8(laudo_norm)} "
+                          f"cands={len(laudos_baixados)} fora_janela={_fora_janela} "
+                          f"ratio_max={_melhor_ratio:.3f} vs='{(_melhor_nome or '-')[:45]}' "
+                          f"limiar={DEDUP_SIMILARIDADE}")
+
                 if dup_nome:
                     print(f"    [RPA] Ignorado (cópia do mesmo laudo já baixado "
-                          f"'{dup_nome}'): {name_str}")
+                          f"'{dup_nome}' ratio={dup_ratio:.3f}): {name_str}")
                     write_download_history(exam_history_id)
                     report.registrar_ignorado(nome_paciente)
                     report.atualizar_decisao_exame(  # [MÉTRICAS]

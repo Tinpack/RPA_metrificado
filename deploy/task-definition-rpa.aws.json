@@ -1,0 +1,57 @@
+{
+  "family": "clickpalmia-rpa",
+  "cpu": "1024",
+  "memory": "2048",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "runtimePlatform": { "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX" },
+  "executionRoleArn": "arn:aws:iam::857145323577:role/clickpalmia-apa-execution-role",
+  "taskRoleArn": "arn:aws:iam::857145323577:role/clickpalmia-apa-task-role",
+  "containerDefinitions": [
+    {
+      "name": "clickpalmia-rpa",
+      "image": "857145323577.dkr.ecr.us-east-1.amazonaws.com/clickpalmia-rpa:latest",
+      "essential": true,
+      "environment": [
+        { "name": "HEADLESS", "value": "true" },
+        { "name": "DOCKER_CONTAINER", "value": "true" },
+        { "name": "AWS_REGION", "value": "us-east-1" },
+        { "name": "INFRA_VCPU", "value": "1.0" },
+        { "name": "INFRA_MEM_GB", "value": "2.0" },
+        { "name": "GOOGLE_CREDS_FILE", "value": "/data/credenciais.json" },
+        { "name": "DOWNLOAD_DIR", "value": "/data/rpa/downloads" },
+        { "name": "HISTORY_FILE", "value": "/data/rpa/historico_downloads.json" },
+        { "name": "REPORTS_DIR", "value": "/data/rpa/reports" },
+        { "name": "TELEMETRIA_DIR", "value": "/data/rpa/telemetria" },
+        { "name": "SHEET_URL", "value": "https://docs.google.com/spreadsheets/d/1e4Sf434cde9yQvzpSyP9WxSTNBhhyJUSo-F6tZQETxc/edit?gid=1526911737#gid=1526911737" },
+        { "name": "RESULTS_S3_URI", "value": "s3://clickpalmia-metricas-857145323577/rpa" }
+      ],
+      "secrets": [
+        { "name": "PORTAL_USER", "valueFrom": "arn:aws:secretsmanager:us-east-1:857145323577:secret:clickpalmia-apa/PORTAL_USER" },
+        { "name": "PORTAL_PASS", "valueFrom": "arn:aws:secretsmanager:us-east-1:857145323577:secret:clickpalmia-apa/PORTAL_PASS" }
+      ],
+      "mountPoints": [
+        { "sourceVolume": "data", "containerPath": "/data", "readOnly": false }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/clickpalmia-rpa",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "rpa"
+        }
+      }
+    }
+  ],
+  "volumes": [
+    {
+      "name": "data",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "fs-01ee9f4ac9ecfb281",
+        "rootDirectory": "/",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": { "accessPointId": "fsap-0684fec1d223878c0", "iam": "DISABLED" }
+      }
+    }
+  ]
+}

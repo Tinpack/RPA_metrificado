@@ -1,6 +1,7 @@
 .env
 venv/
 downloads/
+downloads*/
 __pycache__/
 credenciais.json
 historico_downloads.json
@@ -20,3 +21,11 @@ legado/
 
 # Anotações locais
 FLUXO.md
+log.txt
+log_dedup*.txt
+
+# Segredos AWS (access keys) — NUNCA versionar
+credencials.txt
+*credencial*
+*accessKeys*.csv
+*.pem

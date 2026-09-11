@@ -1,0 +1,51 @@
+{
+  "_comentario": "Template de Task Definition ECS Fargate do RPA. Troque os campos REPLACE_* (conta, regiao, ARNs, IDs do EFS). O APA deve usar cpu/memory IDENTICOS para a comparacao de custo ser justa. cpu 1024 = 1 vCPU, memory 2048 = 2 GB (batem com INFRA_VCPU/INFRA_MEM_GB no config.py).",
+  "family": "rpa-exames",
+  "cpu": "1024",
+  "memory": "2048",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "runtimePlatform": { "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX" },
+  "executionRoleArn": "arn:aws:iam::REPLACE_CONTA:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::REPLACE_CONTA:role/rpa-task-role",
+  "containerDefinitions": [
+    {
+      "name": "rpa-exames",
+      "image": "REPLACE_CONTA.dkr.ecr.REPLACE_REGIAO.amazonaws.com/rpa-exames:latest",
+      "essential": true,
+      "environment": [
+        { "name": "HEADLESS", "value": "true" },
+        { "name": "INFRA_VCPU", "value": "1.0" },
+        { "name": "INFRA_MEM_GB", "value": "2.0" },
+        { "name": "GOOGLE_CREDS_FILE", "value": "/data/credenciais.json" }
+      ],
+      "secrets": [
+        { "name": "PORTAL_USER", "valueFrom": "arn:aws:secretsmanager:REPLACE_REGIAO:REPLACE_CONTA:secret:rpa/PORTAL_USER" },
+        { "name": "PORTAL_PASS", "valueFrom": "arn:aws:secretsmanager:REPLACE_REGIAO:REPLACE_CONTA:secret:rpa/PORTAL_PASS" },
+        { "name": "SHEET_URL",   "valueFrom": "arn:aws:secretsmanager:REPLACE_REGIAO:REPLACE_CONTA:secret:rpa/SHEET_URL" }
+      ],
+      "mountPoints": [
+        { "sourceVolume": "data", "containerPath": "/data", "readOnly": false }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/rpa-exames",
+          "awslogs-region": "REPLACE_REGIAO",
+          "awslogs-stream-prefix": "rpa",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ],
+  "volumes": [
+    {
+      "name": "data",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "REPLACE_EFS_ID",
+        "rootDirectory": "/",
+        "transitEncryption": "ENABLED"
+      }
+    }
+  ]
+}

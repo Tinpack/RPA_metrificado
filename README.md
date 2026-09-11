@@ -1,6 +1,6 @@
 # RPA de Extração de Exames (Playwright)
 
-Pipeline de extração de exames do portal HMV, 100% determinístico via **Playwright**. O robô lê a fila de pacientes do Google Sheets, baixa os exames relevantes a partir de 2024 (salvos localmente em `downloads/`) e gera relatórios de execução e de erros para intervenção manual.
+Pipeline de extração de exames do portal HMV, 100% determinístico via **Playwright**. O robô lê a fila de pacientes do Google Sheets, baixa os exames relevantes da **janela 2024–2025** (mamografia e ecografia de mama/axila), filtrando por modalidade e pelo conteúdo do laudo, deduplicando cópias do mesmo laudo, e salva os PDFs em `downloads/`. Gera relatórios de execução e de erros para intervenção manual.
 
 ---
 
@@ -13,17 +13,27 @@ Princípios: separação de responsabilidades, **uma única sessão de browser**
 ## Estrutura de Arquivos
 
 * **`main.py` (Orquestrador):**
-  Lê a fila de pacientes do Google Sheets (onde `STATUS = 1`). Abre o navegador e faz login **uma única vez**. Itera os pacientes chamando o `core.py`, resetando a barra de pesquisa entre cada um. No final, fecha o browser e gera os relatórios.
+  Lê a fila de pacientes do Google Sheets (onde `STATUS = 1`). Força **UTF-8 no stdout** (laudos com BOM/acentos derrubavam os prints no console Windows) e abre o navegador com **viewport alto (1280×2200)** — a lista de resultados da busca renderiza só as linhas que cabem na janela, e com 720px o robô perdia pacientes no fim da lista. Faz login **uma única vez**, itera os pacientes chamando o `core.py` e reseta a barra de pesquisa entre cada um. No final, fecha o browser e gera os relatórios.
 * **`core.py` (RPA):**
-  Contém o robô Playwright. Funções principais: `do_login` (idempotente — só preenche o form se o portal mostrar), `buscar_paciente` (pesquisa e aguarda o resultado certo via o contador da aba "Localizar paciente (N)", saindo cedo como não-encontrado quando o contador é `(0)`), `reset_para_busca` (volta para a aba "Localizar paciente" e fecha as guias de paciente abertas — ação interna do app, sem recarregar; re-login só se a sessão cair), `process_patient_exams` (busca o paciente, mapeia exames de 2024+, **ignora laudos de localização pré-operatória / cartas de procedimento**, baixa e salva os PDFs em `downloads/`). Lida com extração de PDFs dentro de `iframes` e conversão de visualizadores HTML em PDF.
+  Contém o robô Playwright. Funções principais: `do_login` (idempotente — só preenche o form se o portal mostrar), `buscar_paciente` (pesquisa e aguarda o resultado certo, match exato do nome; sai cedo como não-encontrado quando o contador da aba é `(0)`), `reset_para_busca` (volta para a aba "Localizar paciente" e fecha as guias de paciente abertas — ação interna do app, sem recarregar; re-login só se a sessão cair), `is_relevant_exam` (aceita/rejeita um exame pelo **nome do card**), `process_patient_exams` (busca o paciente e processa os exames). O processamento aplica, em camadas:
+  1. **Filtro por modalidade no card** — aceita só mama/eco e **rejeita** modalidades não autorizadas (ressonância, tomografia, cintilografia, densitometria) e procedimentos (biópsia, punção, localização, *guiada por imagem*);
+  2. **Decisão pelo laudo** — se o laudo traz "PREZADO(A) COLEGA"/pré-op no corpo, decide pelo **TÍTULO**: mantém se for exame diagnóstico válido (ecografia/mamografia), ignora se for biópsia/pré-op puro; ressonância é barrada pelo cabeçalho do laudo;
+  3. **Dedup por conteúdo** — 1 laudo combinado aparece em vários cards; baixa uma vez só, comparando o texto do laudo por similaridade dentro de uma janela de dias.
+  Baixa e salva os PDFs em `downloads/`, lidando com extração dentro de `iframes` e conversão de visualizadores HTML em PDF.
 * **`report_manager.py` (Relatórios):**
   Classe `ReportManager` acumula estatísticas durante a execução e produz dois arquivos em `reports/` ao final:
   - `erros_DD-MM-YYYY_HHMMSS.json` — lista cada falha com paciente, CPF, data do exame, nome do exame, etapa (`patient_not_found`, `relatorio_indisponivel`, `extract_pdf_failed`, `exam_crash`, `patient_session_crash`) e motivo. Permite intervenção manual.
-  - `execucao_DD-MM-YYYY_HHMMSS.txt` — total de pacientes processados, total de exames baixados, total de exames ignorados (localização pré-operatória), quebra por paciente (alvos, baixados, ignorados, falhas) e tempo total de execução.
+  - `execucao_DD-MM-YYYY_HHMMSS.txt` — total de pacientes processados, total de exames baixados, total de exames ignorados (localização pré-op / cópias de laudo), quebra por paciente (alvos, baixados, ignorados, falhas) e tempo total de execução.
+  - `metricas/telemetria/run_*.json` — dados brutos por execução, com a **decisão** de cada exame visto: `baixado`, `ja_no_historico`, `ignorado_data`, `ignorado_irrelevante`, `ignorado_apenas_imagens`, `ignorado_marcador` (biópsia/pré-op puro), `ignorado_ressonancia`, `ignorado_duplicado` (cópia do mesmo laudo).
 * **`data_manager.py` (Histórico):**
   Gerencia o `historico_downloads.json` (para não baixar exames duplicados em execuções futuras) e utilitários de normalização de nomes.
 * **`config.py` (Configurações Globais):**
-  Variáveis de ambiente, caminhos de diretórios, seletores CSS do portal e constantes de filtro/timeout: `EXAM_YEAR_CUTOFF = 2024`, `EXAM_EXCLUDE_KEYWORDS` (nomes de exame a ignorar, ex.: localização pré-cirúrgica), `EXAM_REPORT_EXCLUDE_MARKERS` (marcadores no texto do laudo que indicam carta de procedimento, não exame diagnóstico) e os timeouts de busca/exames (`SEARCH_TIMEOUT`, `SEARCH_NOT_FOUND_GRACE`, `STUDY_WAIT_TIMEOUT`, `LAUDO_WAIT_TIMEOUT`, `REPORT_POPUP_TIMEOUT`).
+  Variáveis de ambiente, caminhos de diretórios, seletores CSS do portal e constantes de filtro/timeout. Principais:
+  - **Janela de exames:** `EXAM_YEAR_CUTOFF = 2024` e `EXAM_YEAR_MAX = 2025`.
+  - **Filtro do card:** `EXAM_MODALIDADES_PROIBIDAS` (regex de modalidades não autorizadas — RM/TC/PET/cintilografia/densitometria), `EXAM_PROCEDIMENTOS_PROIBIDOS` (biópsia/punção/localização/needle/*guiada por*), `EXAM_EXCLUDE_KEYWORDS` (localização pré-cirúrgica pelo nome).
+  - **Filtro do laudo:** `EXAM_REPORT_EXCLUDE_MARKERS` (marcadores de carta/procedimento no corpo, ex.: "PREZADO(A) COLEGA") e `EXAM_REPORT_RM_MARKERS` + `EXAM_REPORT_HEADER_DELIM` (detecção de ressonância só no cabeçalho do laudo).
+  - **Dedup de cópias:** `DEDUP_SIMILARIDADE` (ratio mínimo de similaridade do laudo), `DEDUP_JANELA_DIAS` (janela de dias entre cards).
+  - **Timeouts/busca:** `SEARCH_TIMEOUT`, `SEARCH_NOT_FOUND_GRACE`, `SEARCH_SCROLL_CICLOS`, `STUDY_WAIT_TIMEOUT`, `LAUDO_WAIT_TIMEOUT`, `REPORT_POPUP_TIMEOUT`, `REPORT_POPUP_RETRIES`.
 
 ---
 
@@ -33,8 +43,8 @@ Princípios: separação de responsabilidades, **uma única sessão de browser**
 2. **Login único:** O Playwright abre o navegador e faz login no portal HMV uma vez.
 3. **Processamento:** Para cada paciente:
    - Preenche o nome na barra de pesquisa e aguarda o resultado pelo contador da aba; abre o prontuário.
-   - Mapeia exames de **2024 em diante** que casem com as palavras-chave (mamografia, ultrassonografia etc.), que **não** sejam de localização pré-cirúrgica (pelo nome) e que ainda não estejam no histórico de downloads. Duplicatas do mesmo card (mesma data/hora + texto) são colapsadas.
-   - Para cada exame: clica no estudo e lê o laudo; se o conteúdo for carta de localização pré-operatória / procedimento, **ignora** (não baixa). Caso contrário, clica em Imprimir, extrai o PDF (via URL direta, blob, ou render HTML→PDF como fallback) e salva em `downloads/`.
+   - Mapeia exames da **janela 2024–2025** que casem com as palavras-chave de mama/eco, **rejeitando pelo nome do card** modalidades não autorizadas (ressonância, tomografia, cintilografia, densitometria) e procedimentos (biópsia, punção, localização, *guiada por imagem*), e que ainda não estejam no histórico de downloads. Duplicatas do mesmo card (mesma data/hora + texto) são colapsadas.
+   - Para cada exame: clica no estudo e lê o laudo. Se o laudo tiver marcador de carta/procedimento ("PREZADO(A) COLEGA", pré-op) no corpo, decide pelo **TÍTULO** — mantém se for exame diagnóstico válido (a ecografia/mamografia real também usa essa saudação), ignora se o título for biópsia/pré-op puro; ressonância é barrada pelo cabeçalho. Antes de salvar, compara o texto do laudo com os já baixados do paciente e **pula cópias** (mesmo laudo combinado exposto em vários cards). Caso siga, clica em Imprimir, extrai o PDF (via URL direta, blob, ou render HTML→PDF como fallback) e salva em `downloads/`.
    - Falhas em qualquer etapa são registradas no `ReportManager` com etapa e motivo, e o robô segue para o próximo exame.
 4. **Reset entre pacientes:** O robô volta para a aba "Localizar paciente" e fecha a guia do paciente (ação interna do app, sem recarregar nem re-logar); re-login só se a sessão cair. O browser **nunca é fechado** entre pacientes.
 5. **Sheets:** Pacientes processados sem falhas — ou que **não foram encontrados** no portal — têm `STATUS` atualizado para `0` (saem da fila). `partial_fail` e `crash` permanecem com `STATUS = 1` para reprocessamento.
@@ -73,8 +83,8 @@ python main.py
 
 Os PDFs baixados ficam em `downloads/` e os relatórios em `reports/`.
 
-### Ajustando o corte de ano dos exames
-Para mudar o ano a partir do qual os exames são considerados, edite `EXAM_YEAR_CUTOFF` em `config.py`.
+### Ajustando a janela de anos dos exames
+Os exames considerados ficam entre `EXAM_YEAR_CUTOFF` (2024) e `EXAM_YEAR_MAX` (2025) em `config.py` — edite ambos para mudar a janela.
 
 ---
 

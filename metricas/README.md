@@ -47,10 +47,11 @@ para conferir a conformidade — não altera arquivos.
 |---|---|
 | Identificação | `Data`, `Hora` |
 | Operacional | `Total_Pacientes`, `Exames_Sucesso`, `Total_Erros`, `Taxa_Sucesso_%`, `Tempo_Total_s`, `Tempo_Medio_Paciente_s`, `Tipos_Erro` |
-| **Bloco 1** | `VP`, `FP`, `FN`, `VN`, `Total`, `Sem_Gabarito`, `Fora_Janela`, `Acuracia`, `Precisao`, `Revocacao`, `F1` |
+| **Bloco 1** | `VP`, `FP`, `FN`, `VN`, `Total`, `Sem_Gabarito`, `Fora_Janela`, `Duplicados`, `Acuracia`, `Precisao`, `Revocacao`, `F1` |
 | **Bloco 3** | `Total_Alvos`, `Login_OK`, `Busca_OK`, `Download_unitario_OK`, `Download_completo_OK`, `Taxa_Login`, `Taxa_Busca`, `Taxa_Download_unitario`, `Taxa_Download_completo` |
+| Custo (Fargate) | `Custo_Infra_USD`, `Custo_por_1000_exec` |
 
-Denominadores das taxas do Bloco 3: `Taxa_Login`/`Taxa_Busca`/`Taxa_Download_completo` = ÷ nº de pacientes; **`Taxa_Download_unitario` = baixados ÷ alvos** (fração dos exames-alvo efetivamente baixados).
+📐 **A fórmula de cada coluna está em [CALCULOS.md](CALCULOS.md)** — inclui os denominadores das taxas, o cálculo do custo e como a linha `Média` agrega (soma nas contagens, média nas taxas).
 
 ## O gabarito (`metricas/gabarito.csv`)
 
@@ -78,6 +79,7 @@ O casamento com a telemetria é por `paciente + data_exame + nome_exame` (ignora
 ## Convenções e suposições
 
 - **`baixado` / `ja_no_historico`** contam como *coletado* (positivo) no Bloco 1.
-- O mesmo exame às vezes aparece em 2 cards do portal → o refino **deduplica** (mantém a decisão de maior prioridade: `baixado` > `ja_no_historico` > ignorados).
+- **Decisões possíveis na telemetria:** `baixado`, `ja_no_historico`, `ignorado_data` (fora da janela), `ignorado_irrelevante` (não bate as palavras-alvo), `ignorado_apenas_imagens`, `ignorado_marcador` (biópsia/pré-op puro pelo título do laudo), `ignorado_ressonancia` (RM pelo cabeçalho), `ignorado_duplicado` (cópia do mesmo laudo já baixado). Só `baixado`/`ja_no_historico` contam como coletado.
+- O mesmo exame às vezes aparece em vários cards do portal → o **download deduplica** por conteúdo do laudo (`ignorado_duplicado`), e o refino também **deduplica** (mantém a decisão de maior prioridade: `baixado` > `ja_no_historico` > ignorados).
 - **Login** é por execução; no Bloco 3 é replicado a cada paciente. Ajustável em `calcular_etapas`.
 - Divisões com denominador zero saem vazias (espelha o `IFERROR` da planilha).

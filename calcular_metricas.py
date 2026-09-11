@@ -130,13 +130,23 @@ def carregar_gabarito(path):
 # ---------------------------------------------------------------- Bloco 1
 def classificar_exames(exames, gabarito):
     detalhe = []
-    vp = fp = fn = vn = sem_gabarito = fora_janela = 0
+    vp = fp = fn = vn = sem_gabarito = fora_janela = duplicados = 0
     for ev in exames:
         # Janela primeiro: exames fora de 2024-2025 não entram no universo
         # VP/FP/FN/VN (evita a inflação de VN por exames antigos e ignora 2026+).
         if not _dentro_janela(ev.get("data_exame")):
             detalhe.append({**ev, "autorizado": None, "classificacao": "FORA_JANELA"})
             fora_janela += 1
+            continue
+
+        # Cópia de um laudo combinado já coletado por outro card: o RPA reconheceu
+        # como duplicata. NÃO é acerto nem erro de coleta (o laudo é pego 1x via o
+        # card mantido), então fica FORA do universo VP/FP/FN/VN — mas é contado à
+        # parte (auditoria da dedup: nº alto de duplicatas => investigar). Evita o
+        # FN falso que surgia quando o gabarito autorizava os dois cards do laudo.
+        if ev.get("decisao") == "ignorado_duplicado":
+            detalhe.append({**ev, "autorizado": None, "classificacao": "DUPLICADO"})
+            duplicados += 1
             continue
 
         coletado = ev.get("decisao") in DECISOES_COLETADO
@@ -163,6 +173,7 @@ def classificar_exames(exames, gabarito):
     resumo = {
         "VP": vp, "FP": fp, "FN": fn, "VN": vn, "Total": total,
         "Sem_Gabarito": sem_gabarito, "Fora_Janela": fora_janela,
+        "Duplicados": duplicados,
         "Acuracia": _div(vp + vn, total), "Precisao": precisao,
         "Revocacao": revocacao, "F1": f1,
     }
@@ -212,24 +223,43 @@ def calcular_operacional(run):
     }, tipos
 
 
+# [CUSTO] "Custo por Execução" (ECS Fargate), a partir do bloco `infra` gravado na
+# telemetria pelo report_manager. Os preços vêm na própria telemetria (não aqui),
+# então mudar de região/tamanho de task não exige tocar neste arquivo. Fargate
+# cobra no mínimo 1 min por task -> billed_s = max(60, duração).
+def calcular_custo(run):
+    infra = run.get("infra")
+    if not infra:  # telemetria antiga (sem infra) -> colunas vazias, sem quebrar
+        return {"Custo_Infra_USD": None, "Custo_por_1000_exec": None}
+    dur = infra.get("duracao_s") or run.get("duracao_s") or 0
+    billed_s = max(60.0, float(dur))
+    custo = ((float(infra.get("vcpu", 0)) * float(infra.get("custo_vcpu_hora", 0)))
+             + (float(infra.get("memoria_gb", 0)) * float(infra.get("custo_memoria_gb_hora", 0)))
+             ) * billed_s / 3600.0
+    return {"Custo_Infra_USD": custo, "Custo_por_1000_exec": custo * 1000}
+
+
 # ---------------------------------------------------------------- saída
 COLUNAS_GERAL = [
     "Data", "Hora",
     "Total_Pacientes", "Exames_Sucesso", "Total_Erros", "Taxa_Sucesso_%",
     "Tempo_Total_s", "Tempo_Medio_Paciente_s", "Tipos_Erro",
     # Bloco 1
-    "VP", "FP", "FN", "VN", "Total", "Sem_Gabarito", "Fora_Janela",
+    "VP", "FP", "FN", "VN", "Total", "Sem_Gabarito", "Fora_Janela", "Duplicados",
     "Acuracia", "Precisao", "Revocacao", "F1",
     # Bloco 3
     "Total_Alvos", "Login_OK", "Busca_OK", "Download_unitario_OK", "Download_completo_OK",
     "Taxa_Login", "Taxa_Busca", "Taxa_Download_unitario", "Taxa_Download_completo",
+    # Custo (ECS Fargate)
+    "Custo_Infra_USD", "Custo_por_1000_exec",
 ]
 CONTAGENS = ["Total_Pacientes", "Exames_Sucesso", "Total_Erros", "VP", "FP", "FN",
-             "VN", "Total", "Sem_Gabarito", "Fora_Janela", "Total_Alvos", "Login_OK",
-             "Busca_OK", "Download_unitario_OK", "Download_completo_OK"]
+             "VN", "Total", "Sem_Gabarito", "Fora_Janela", "Duplicados", "Total_Alvos",
+             "Login_OK", "Busca_OK", "Download_unitario_OK", "Download_completo_OK"]
 TAXAS = ["Taxa_Sucesso_%", "Acuracia", "Precisao", "Revocacao", "F1", "Taxa_Login",
          "Taxa_Busca", "Taxa_Download_unitario", "Taxa_Download_completo",
-         "Tempo_Total_s", "Tempo_Medio_Paciente_s"]
+         "Tempo_Total_s", "Tempo_Medio_Paciente_s",
+         "Custo_Infra_USD", "Custo_por_1000_exec"]
 
 
 def _fmt(v):
@@ -247,6 +277,7 @@ def processar_run(run, gabarito):
     oper, tipos_erro = calcular_operacional(run)
     linha = {"run_id": run.get("run_id", "")}
     linha.update(oper); linha.update(resumo1); linha.update(resumo3)
+    linha.update(calcular_custo(run))
     return linha, detalhe, tipos_erro
 
 
@@ -298,7 +329,7 @@ def escrever_detalhado(run, linha, detalhe, tipos_erro, saida_dir):
         w.writerow(["Tempo Médio/Paciente (s)", _fmt(linha["Tempo_Medio_Paciente_s"])])
         w.writerow(["Login OK", "sim" if run.get("login_ok") else "não"])
         w.writerow(["-- Bloco 1 (Extração) --"])
-        for k in ["VP", "FP", "FN", "VN", "Sem_Gabarito", "Fora_Janela"]:
+        for k in ["VP", "FP", "FN", "VN", "Sem_Gabarito", "Fora_Janela", "Duplicados"]:
             w.writerow([k, linha[k]])
         for k in ["Acuracia", "Precisao", "Revocacao", "F1"]:
             w.writerow([k, _fmt(linha[k])])

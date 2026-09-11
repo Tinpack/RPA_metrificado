@@ -4,7 +4,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 IS_DOCKER = os.path.exists('/.dockerenv') or os.getenv('DOCKER_CONTAINER', 'false').lower() == 'true'
-HEADLESS_MODE = os.getenv('HEADLESS', str(IS_DOCKER)).lower() == 'false'
+# Headless a menos que explicitamente "false". No Docker/Fargate (sem X server)
+# TEM que ser headless — HEADLESS=true (default da imagem) cai aqui em True.
+HEADLESS_MODE = os.getenv('HEADLESS', str(IS_DOCKER)).lower() != 'false'
 
 SITE_URL = "https://portalpacientesexames.hmv.org.br/portal/WebLogin.aspx?force_all_browsers=truebr/"
 USER = os.getenv("PORTAL_USER", "")
@@ -18,6 +20,22 @@ SEARCH_BAR_SELECTOR = "sptGeneralDetailsInput"
 DOWNLOAD_DIR = os.path.abspath(os.getenv("DOWNLOAD_DIR", "./downloads"))
 HISTORY_FILE = os.path.abspath(os.getenv("HISTORY_FILE", "./historico_downloads.json"))
 REPORTS_DIR = os.path.abspath(os.getenv("REPORTS_DIR", "./reports"))
+# Conta de serviço do Google Sheets. Configurável por env para o deploy AWS, onde
+# o arquivo é montado via EFS (não embutido na imagem) — pode ficar fora de /app.
+GOOGLE_CREDS_FILE = os.getenv("GOOGLE_CREDS_FILE", "credenciais.json")
+# Se setado (ex.: s3://bucket/rpa), o RPA sobe telemetria+reports pro S3 ao final
+# da execução — pro grupo baixar e rodar as métricas sem acessar o EFS. Vazio =
+# não sobe nada (comportamento local normal). Os PDFs de laudo NÃO sobem (LGPD).
+RESULTS_S3_URI = os.getenv("RESULTS_S3_URI", "")
+
+# Custo de infraestrutura (ECS Fargate) — base do "Custo por Execução" (Seção 2.6
+# do artigo). Os valores de vCPU/memória devem BATER com a task definition; os
+# preços são US East (do documento de deploy). Tudo configurável por env para não
+# precisar reeditar código ao mudar de tamanho de task ou de região.
+INFRA_VCPU = float(os.getenv("INFRA_VCPU", "1.0"))
+INFRA_MEM_GB = float(os.getenv("INFRA_MEM_GB", "2.0"))
+FARGATE_VCPU_HORA = float(os.getenv("FARGATE_VCPU_HORA", "0.04048"))
+FARGATE_MEM_GB_HORA = float(os.getenv("FARGATE_MEM_GB_HORA", "0.004445"))
 
 EXAM_YEAR_CUTOFF = 2024
 EXAM_YEAR_MAX = 2025
@@ -35,9 +53,32 @@ REPORT_POPUP_RETRIES = 1         # tentativas extras se o popup não abrir (time
 # US MAMARIA / US AXILAR), gerando PDFs com o mesmo conteúdo clínico. Entre as
 # cópias mudam a data e os identificadores do rodapé (alguns nem aparecem em
 # todas), então a comparação é por SIMILARIDADE do texto, não por hash exato.
+# DEDUP_SIMILARIDADE: com a captura do laudo ESTABILIZADA (_laudo_frame_estavel em
+# core.py), a cópia real do mesmo laudo pontua ~0,98 de forma consistente e um stub
+# distinto (ex.: US AXILAR "Somente relatório", quase vazio) fica ~0,89 — logo 0,90
+# separa os dois com folga. NÃO baixar daqui: abaixo de 0,90 o stub (a manter) colide
+# com cópias, e o problema de vazamento era captura instável (resolvido), não o número.
 DEDUP_SIMILARIDADE = 0.90   # ratio mínimo (difflib) para considerar o mesmo laudo
 DEDUP_JANELA_DIAS = 7       # só deduplica cards a <= N dias (cópias ficam em 1-4)
-DEDUP_LOG_RATIO_MIN = 0.85  # loga o ratio quando ficar perto mas abaixo do limiar
+DEDUP_LOG_RATIO_MIN = 0.70  # loga ratios a partir daqui (near-miss abaixo do limiar) e
+                            # serve de corte do quick_ratio. Só afeta LOG, não a decisão.
+
+# [DIAGNÓSTICO] Liga o log detalhado da dedup e da captura do laudo. Existe porque um
+# ratio 0.0 por captura parcial/vazia hoje passa em silêncio (fica abaixo do
+# DEDUP_LOG_RATIO_MIN) e a cópia acaba baixada -> vira FP contra o gabarito. Fenômeno
+# não-determinístico e visto só na AWS (container mais lento/headless).
+# Desligado por padrão; liga por execução com deploy/debug-dedup-overrides.json,
+# que injeta só o `environment` da task (o CMD da imagem segue intacto).
+# NUNCA muda decisão: é apenas print.
+DEBUG_DEDUP = os.getenv("DEBUG_DEDUP", "") == "1"
+
+# [DIAGNÓSTICO] Zera o historico_downloads.json no INÍCIO da execução. Existe para a
+# reprodução do bug da dedup: com o histórico populado os exames saem como
+# `ja_no_historico`, o download nem acontece e o caminho da dedup não executa — o bug
+# nunca aparece. Guarda um .bak ao lado antes de zerar. Separado do DEBUG_DEDUP porque
+# um é log e o outro MEXE em estado; os dois vêm juntos em
+# deploy/debug-dedup-overrides.json só por conveniência.
+RESET_HISTORICO = os.getenv("RESET_HISTORICO", "") == "1"
 
 EXAM_EXCLUDE_KEYWORDS = [
     "LOCALIZACAO PRE",
@@ -73,15 +114,16 @@ EXAM_REPORT_RM_MARKERS = ["RESSONANCIA MAGNETICA", "RM DE MAMA"]
 EXAM_REPORT_HEADER_DELIM = "INFORMACAO CLINICA"  # daqui pra baixo é corpo do laudo
 EXAM_REPORT_HEADER_MAX = 400                     # fallback se o delimitador sumir
 
-# Marcadores no texto do laudo que indicam que NÃO é um exame diagnóstico e
-# não deve ser enviado para a API. O nome do card às vezes engana (diz "MAMO"
-# mas o laudo é outra coisa), então a checagem é feita no texto do laudo.
+# Marcadores no CORPO do laudo que SINALIZAM (não decidem) uma possível carta de
+# procedimento. O nome do card às vezes engana (diz "US MAMARIA" mas o laudo é
+# "BIOPSIA DE MAMA"), então esses marcadores no corpo disparam uma 2ª checagem.
 #
-# "PREZADO(A) COLEGA": validado no portal — laudos com essa saudação são
-# cartas de encaminhamento/procedimento (localização pré-op, demarcação,
-# biópsia), nunca o laudo diagnóstico em si. Ex.: card "US MAMARIA" cujo
-# Procedimento real era "BIOPSIA DE MAMA". Os laudos diagnósticos reais
-# (mamografia, US) NÃO trazem essa saudação. NÃO remover sem revalidar.
+# ATENÇÃO: "PREZADO(A) COLEGA" sozinho NÃO basta para pular — validado no portal
+# que laudos diagnósticos VÁLIDOS (ecografia/mamografia) TAMBÉM trazem essa
+# saudação (ex.: a ecografia da paciente Janete). Por isso, quando um destes
+# marcadores aparece, a decisão final é pelo TÍTULO do laudo
+# (`_laudo_tem_titulo_valido` em core.py): mantém se o título for exame
+# diagnóstico válido; só pula biópsia/pré-op PUROS (título é o procedimento).
 EXAM_REPORT_EXCLUDE_MARKERS = [
     "LOCALIZACAO PRE-OPERATORIA",
     "LOCALIZACAO PRE OPERATORIA",
