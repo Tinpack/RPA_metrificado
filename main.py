@@ -230,7 +230,11 @@ def run_automation():
                     print(f"Paciente {nome} terminou com status={stats['status']} (falhas: {stats['falhas']})")
 
                 try:
-                    reset_para_busca(page)
+                    # Reset falho deixa a tela no estado da paciente anterior e a
+                    # busca seguinte lê a tabela velha -> "não encontrada" falso.
+                    if not reset_para_busca(page):
+                        print(f"AVISO: reset para busca NAO confirmado após {nome} — "
+                              f"a próxima busca pode ler a tabela dela")
                 except Exception as e:
                     print(f"AVISO: Falha ao resetar para busca após {nome}: {e}")
         finally:

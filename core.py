@@ -71,9 +71,16 @@ def _texto_laudo(page) -> str:
 
 
 def _frame_do_laudo(page):
-    # [DIAGNÓSTICO] Aponta qual frame contém o laudo (maior frame, excluindo o
-    # frame principal da UI #0). Retorna (indice, texto) ou (None, "").
-    melhor_i, melhor_t = None, ""
+    # Aponta qual frame contém o laudo (maior frame, excluindo o frame principal
+    # da UI #0). Retorna (indice, texto) ou (None, "").
+    #
+    # O ranking é por texto NORMALIZADO (sem espaço em branco), não pelo tamanho
+    # cru. A casca do visualizador (LVClient/DefaultLightViewer.aspx) devolve 31
+    # caracteres de puro `\t\n` — e vencia o laudo real quando este era menor:
+    # o caso "Laudo com Us mamária" tem 23 chars crus, perdia por 31>23, e o RPA
+    # capturava a casca. Normalizado, a casca vale 0 e nunca ganha. Mede o mesmo
+    # que a dedup compara depois (_normalizar_laudo), então os dois concordam.
+    melhor_i, melhor_t, melhor_n = None, "", 0
     for i, fr in enumerate(page.frames):
         if i == 0:
             continue  # frame principal = UI do portal (lista de cards, abas)
@@ -81,8 +88,9 @@ def _frame_do_laudo(page):
             t = fr.inner_text("body")
         except Exception:
             continue
-        if len(t) > len(melhor_t):
-            melhor_i, melhor_t = i, t
+        n = len(_normalizar_laudo(t))
+        if n > melhor_n:
+            melhor_i, melhor_t, melhor_n = i, t, n
     return melhor_i, melhor_t
 
 
@@ -138,16 +146,12 @@ def _texto_laudo_frame(page) -> str:
     # Só o conteúdo do laudo (frames), SEM o body da página: o body traz toda a
     # UI do portal (lista de cards, abas) e dois exames diferentes ficariam
     # ~95% parecidos só por isso, inviabilizando a comparação por similaridade.
-    # Heurística: o maior texto entre os frames é o relatório.
-    melhor = ""
-    for frame in page.frames:
-        try:
-            t = frame.inner_text("body")
-        except Exception:
-            continue
-        if len(t) > len(melhor):
-            melhor = t
-    return melhor
+    # Heurística: o maior texto entre os frames é o relatório — medido pelo texto
+    # NORMALIZADO, senão a casca do visualizador (31 chars de `\t\n`) vence um
+    # laudo curto de verdade. Mesmo critério de _frame_do_laudo.
+    #
+    # NOTA: hoje sem chamador; mantido corrigido para não replantar o defeito.
+    return _frame_do_laudo(page)[1]
 
 
 def _laudo_frame_estavel(page, timeout: float = LAUDO_WAIT_TIMEOUT) -> str:
@@ -177,7 +181,10 @@ def _laudo_frame_estavel(page, timeout: float = LAUDO_WAIT_TIMEOUT) -> str:
     while time.time() - t0 < timeout:
         idx, t = _frame_do_laudo(page)
         amostras += 1
-        if t and t == ultimo:
+        # Exige CONTEÚDO, não só imobilidade: uma casca em branco fica parada e
+        # "estabilizava" em ~0,67s, sendo aceita como laudo. Enquanto o frame real
+        # não renderiza, segue esperando (sobram ~3,3s dos 4s, antes ociosos).
+        if t and _normalizar_laudo(t) and t == ultimo:
             if estavel_desde is not None and (time.time() - estavel_desde) >= 0.5:
                 return _finalizar(t, True, idx)
             if estavel_desde is None:
@@ -193,8 +200,14 @@ def _laudo_frame_estavel(page, timeout: float = LAUDO_WAIT_TIMEOUT) -> str:
     return _finalizar(final, False, idx_final)
 
 
+# Invisíveis que o str.split() NÃO trata como espaço: o laudo do portal começa com
+# BOM, então um frame ainda em branco normalizava para "﻿" — não-vazio — e passava
+# pela checagem de "tem conteúdo". Removidos antes de normalizar.
+_INVISIVEIS = str.maketrans("", "", "﻿​‌‍⁠")
+
+
 def _normalizar_laudo(texto: str) -> str:
-    return " ".join(remove_accents(texto or "").upper().split())
+    return " ".join(remove_accents(texto or "").translate(_INVISIVEIS).upper().split())
 
 
 def _ratio_laudo(a: str, b: str, limiar: float) -> float:
@@ -453,17 +466,23 @@ def reset_para_busca(page):
         search = page.locator(f"#{SEARCH_BAR_SELECTOR}")
         search.wait_for(state="visible", timeout=8000)
         search.first.fill("")
-        return
-    except Exception:
-        pass
+        return True
+    except Exception as e:
+        # Antes era `except: pass` — falhar aqui deixava a tela no estado da paciente
+        # anterior e a busca seguinte lia a tabela velha, sem ninguém saber por quê.
+        print(f"    [RPA][reset] reset leve falhou ({type(e).__name__}: {e}); tentando re-login")
 
     # Fallback: sessão caiu -> re-login completo.
     try:
         do_login(page)
         page.locator(f"#{SEARCH_BAR_SELECTOR}").wait_for(state="visible", timeout=15000)
         page.locator(f"#{SEARCH_BAR_SELECTOR}").first.fill("")
-    except Exception:
-        pass
+        print("    [RPA][reset] re-login concluido")
+        return True
+    except Exception as e:
+        print(f"    [RPA][reset] re-login TAMBEM falhou ({type(e).__name__}: {e}) — "
+              f"a proxima busca pode ler a tabela da paciente anterior")
+        return False
 
 
 def _ler_linhas_resultado(page):
@@ -501,11 +520,30 @@ def _badge_resultado(page):
     return int(m.group(1)) if m else None
 
 
+def _assinatura_resultado(page):
+    # Identidade do conteúdo atual da tabela de resultados, para detectar quando ela
+    # troca de uma busca para a outra. None = tabela vazia/ilegível.
+    try:
+        linhas = _ler_linhas_resultado(page)
+    except Exception:
+        return None
+    if not linhas:
+        return None
+    return tuple(normalize_name(n) for n, _ in linhas)
+
+
 def buscar_paciente(page, nome_paciente: str, timeout: float = SEARCH_TIMEOUT,
                     grace: float = SEARCH_NOT_FOUND_GRACE) -> dict:
     alvo = normalize_name(nome_paciente)
     search = page.locator(f"#{SEARCH_BAR_SELECTOR}")
     search.wait_for(state="visible", timeout=15000)
+
+    # Assinatura da tabela ANTES de buscar. Sem isso, uma busca que não dispara
+    # deixa na tela o resultado da paciente ANTERIOR, e o laço abaixo passava os
+    # 10s relendo essa linha velha até declarar "não encontrada" — zerando o
+    # STATUS de quem existe no portal (casos Susan/Cinara lendo 'Janice').
+    antes = _assinatura_resultado(page)
+
     search.click()
     search.fill("")
     search.fill(remove_accents(nome_paciente))
@@ -517,8 +555,17 @@ def buscar_paciente(page, nome_paciente: str, timeout: float = SEARCH_TIMEOUT,
     linhas_vistas = []       # maior conjunto de linhas já lido (p/ diagnóstico)
     ultimo_total = 0         # p/ detectar quando a lista para de crescer
     ciclos_sem_crescer = 0
+    atualizou = (antes is None)   # sem tabela antes = nada de velho para confundir
     while time.time() < deadline:
         linhas = _ler_linhas_resultado(page)
+        # Só confia no conteúdo depois que a tabela deixar de ser a da busca
+        # anterior. Enquanto for idêntica, é "ainda não atualizou", não "não achou".
+        if not atualizou:
+            if _assinatura_resultado(page) != antes:
+                atualizou = True
+            else:
+                time.sleep(0.25)
+                continue
         if linhas:
             viu_linhas = True
             if len(linhas) > len(linhas_vistas):
@@ -541,7 +588,8 @@ def buscar_paciente(page, nome_paciente: str, timeout: float = SEARCH_TIMEOUT,
         # Saída rápida: já deu tempo da busca rodar e o badge mostra 0 com
         # a tabela vazia -> paciente não existe (evita esperar o timeout todo).
         elif (time.time() - inicio) > grace and _badge_resultado(page) == 0:
-            return {"index": None, "id_cell": None, "viu_linhas": viu_linhas}
+            return {"index": None, "id_cell": None, "viu_linhas": viu_linhas,
+                    "causa": "busca_vazia", "linhas_lidas": [], "badge": 0}
         time.sleep(0.25)
 
     # [DIAGNÓSTICO] Não achou: mostra o que foi lido para distinguir "lista
@@ -552,7 +600,20 @@ def buscar_paciente(page, nome_paciente: str, timeout: float = SEARCH_TIMEOUT,
         for i, (nome_txt, _) in enumerate(linhas_vistas, 1):
             print(f"        {i:02d} '{nome_txt.strip()[:52]}' -> '{normalize_name(nome_txt)[:52]}'")
 
-    return {"index": None, "id_cell": None, "viu_linhas": viu_linhas}
+    # Tipifica o desfecho: "não bateu com nenhuma linha" antes cobria dois casos
+    # OPOSTOS — grafia divergente na planilha (dado a corrigir) e tabela velha
+    # (bug do RPA). Sem separar, o erros_*.json não permitia distinguir.
+    if not atualizou:
+        causa = "busca_nao_atualizou"
+    elif viu_linhas:
+        causa = "nome_divergente"
+    elif _badge_resultado(page) == 0:
+        causa = "busca_vazia"
+    else:
+        causa = "busca_timeout"
+    return {"index": None, "id_cell": None, "viu_linhas": viu_linhas,
+            "causa": causa, "linhas_lidas": [n.strip()[:60] for n, _ in linhas_vistas],
+            "badge": _badge_resultado(page)}
 
 
 def process_patient_exams(page, context, nome_paciente: str, cpf_paciente: str, report) -> dict:
@@ -579,16 +640,29 @@ def process_patient_exams(page, context, nome_paciente: str, cpf_paciente: str, 
         if resultado_busca["index"] is None:
             stats["status"] = "not_found"
             report.registrar_paciente_nao_encontrado(nome_paciente)
-            motivo = (
-                "Nome do paciente não bateu com nenhuma linha da tabela de busca."
-                if resultado_busca["viu_linhas"]
-                else "Paciente não retornado pela busca no portal."
-            )
+            # Causa tipificada pela busca + a EVIDÊNCIA que antes só existia no log
+            # [RPA][busca]. Com isso o erros_*.json basta sozinho para diagnosticar:
+            # busca_nao_atualizou = bug do RPA (repor STATUS na planilha);
+            # nome_divergente = corrigir a grafia; busca_vazia = não está no portal.
+            causa = resultado_busca.get("causa", "patient_not_found")
+            motivos = {
+                "busca_nao_atualizou": ("A tabela de resultados continuou com a busca "
+                                        "ANTERIOR; a paciente NAO foi realmente procurada."),
+                "nome_divergente": ("Tabela atualizou, mas nenhuma linha bateu com o nome "
+                                    "(provavel diferenca de grafia na planilha)."),
+                "busca_vazia": "Busca retornou vazia no portal (paciente nao encontrada).",
+                "busca_timeout": "Busca sem desfecho conclusivo dentro do tempo limite.",
+            }
+            lidas = resultado_busca.get("linhas_lidas") or []
+            motivo = motivos.get(causa, "Paciente não retornado pela busca no portal.")
+            if lidas:
+                motivo += f" Linhas lidas ({len(lidas)}): {'; '.join(lidas[:5])}"
+            motivo += f" [badge={resultado_busca.get('badge')}]"
             report.registrar_erro(
                 paciente=nome_paciente, cpf=cpf_paciente,
                 data_exame="", nome_exame="",
                 motivo=motivo,
-                etapa="patient_not_found",
+                etapa=causa,
             )
             return stats
 
